@@ -1,0 +1,6 @@
+minio
+opensearch-py
+fastapi
+uvicorn
+python-dotenv
+aiofiles

@@ -1,0 +1,65 @@
+services:
+  opensearch:
+    image: docker.io/opensearchproject/opensearch:2.19.1
+    container_name: role5-opensearch
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    restart: unless-stopped
+
+  opensearch-dashboards:
+    image: docker.io/opensearchproject/opensearch-dashboards:2.19.1
+    container_name: role5-opensearch-dashboards
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    ports:
+      - "5601:5601"
+    depends_on:
+      - opensearch
+    restart: unless-stopped
+
+  pyworker:
+    build:
+      context: .
+      dockerfile: pyworker/Dockerfile
+    image: hpe-role5-pyworker:latest
+    container_name: role5-pyworker
+    environment:
+      GRPC_HOST: 0.0.0.0
+      GRPC_SEARCH_PORT: 50052
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCH_PORT: 9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-object-storage-index}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    ports:
+      - "50052:50052"
+    depends_on:
+      - opensearch
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: hpe-role5-frontend:latest
+    container_name: role5-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-}
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCH_PORT: 9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-object-storage-index}
+    restart: unless-stopped
+
+volumes:
+  opensearch-data:
