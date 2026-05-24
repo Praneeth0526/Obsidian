@@ -9,6 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyworker/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Download the spaCy English model (small, ~12 MB, CPU-only)
+RUN python -m spacy download en_core_web_sm
+
 COPY pyworker/ ./pyworker/
 
 EXPOSE 50052

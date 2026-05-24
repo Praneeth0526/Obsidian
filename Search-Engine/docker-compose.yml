@@ -1,7 +1,7 @@
 services:
   opensearch:
     image: docker.io/opensearchproject/opensearch:2.19.1
-    container_name: role5-opensearch
+    container_name: opensearch
     environment:
       discovery.type: single-node
       DISABLE_SECURITY_PLUGIN: "true"
@@ -15,7 +15,7 @@ services:
 
   opensearch-dashboards:
     image: docker.io/opensearchproject/opensearch-dashboards:2.19.1
-    container_name: role5-opensearch-dashboards
+    container_name: opensearch-dashboards
     environment:
       OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
       DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
@@ -25,12 +25,12 @@ services:
       - opensearch
     restart: unless-stopped
 
-  pyworker:
+  pyworker-2:
     build:
       context: .
       dockerfile: pyworker/Dockerfile
-    image: hpe-role5-pyworker:latest
-    container_name: role5-pyworker
+    image: hpe-pyworker-2:latest
+    container_name: pyworker-2
     environment:
       GRPC_HOST: 0.0.0.0
       GRPC_SEARCH_PORT: 50052
@@ -46,19 +46,38 @@ services:
       - opensearch
     restart: unless-stopped
 
+  go-gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    image: hpe-go-gateway:latest
+    container_name: go-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      GATEWAY_PORT: 8080
+      PYWORKER_HOST: pyworker-2
+      PYWORKER_PORT: 50052
+    depends_on:
+      - pyworker-2
+    restart: unless-stopped
+
   frontend:
     build:
       context: .
       dockerfile: frontend/Dockerfile
-    image: hpe-role5-frontend:latest
-    container_name: role5-frontend
+    image: hpe-frontend:latest
+    container_name: frontend
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-}
+      # Route search through the Go Gateway (Stage 2 entry point per Flow.png)
+      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8080}
       OPENSEARCH_HOST: opensearch
       OPENSEARCH_PORT: 9200
       OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-object-storage-index}
+    depends_on:
+      - go-gateway
     restart: unless-stopped
 
 volumes:

@@ -10,14 +10,14 @@ Source: Architecture/Flow.pdf and Project-dessc.txt
   - s3:ObjectCreated triggers Apache Kafka event.
   - PyWorker-1 consumes event, extracts text with Apache Tika.
   - LangChain chunks text, SentenceTransformers embeds chunks.
-  - Dual-index upsert to Qdrant (vector) and Meilisearch/OpenSearch (keyword).
+  - Upsert dense vectors (kNN) and BM25 keyword index into a single OpenSearch cluster.
 - Stage 2 (Real-Time Search)
   - User submits query to Go API Gateway.
   - Gateway checks Redis cache by query hash.
   - Cache hit returns results instantly.
   - Cache miss calls PyWorker-2 via gRPC.
   - PyWorker-2 parses query with LangChain, generates vector with SentenceTransformers.
-  - Hybrid search: vector to Qdrant, keywords to Meilisearch/OpenSearch.
+  - Hybrid search: kNN + BM25 query against a single OpenSearch cluster.
   - Go backend merges Top-K, stores in Redis with TTL, returns snippets and URLs to frontend.
 
 ## Role Assignments (5 Roles)
@@ -33,7 +33,7 @@ Source: Architecture/Flow.pdf and Project-dessc.txt
    - Generate embeddings with all-MiniLM-L2-v2 and hand off to Role 3 for indexing.
 
 3. Search Database Administrator
-   - Deploy and manage Qdrant collections and Meilisearch/OpenSearch indexes.
+   - Deploy and manage OpenSearch (single cluster: kNN vector index + BM25 keyword index).
    - Implement dual-index upsert interface for Role 2.
    - Tune relevance, manage index health and filter configuration.
 
@@ -45,4 +45,4 @@ Source: Architecture/Flow.pdf and Project-dessc.txt
 5. Real-Time Search NLP Engineer (PyWorker-2)
    - Build PyWorker-2 gRPC server and shared .proto contract.
    - Parse queries with LangChain, generate vectors with all-MiniLM-L2-v2.
-   - Execute hybrid search (Qdrant + Meilisearch/OpenSearch) and return ranked results.
+   - Execute hybrid search (kNN + BM25) against OpenSearch and return ranked results.

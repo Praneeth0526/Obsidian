@@ -3,6 +3,6 @@ grpcio-tools
 sentence-transformers
 numpy
 python-dateutil
-langchain
-langchain-openai
+langchain-core
 opensearch-py
+spacy
