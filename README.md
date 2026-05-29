@@ -1,78 +1,296 @@
-# HPE Search (Role 5 Stack)
+# HPE Enterprise Search Engine
 
-This workspace is trimmed to Role 5 (gRPC search worker) plus OpenSearch and a simple HPE-branded frontend. By default the frontend proxies search requests directly to OpenSearch via a built-in `/api/search` route. You can point it to an external Go gateway if needed.
+A production-grade, hybrid (BM25 + kNN) enterprise search pipeline built on OpenSearch, Redis, Kafka, and MinIO. The system is split into two co-operating pipelines:
 
-## What Runs
+| Pipeline | Directory | What it does |
+|----------|-----------|--------------|
+| **Ingestion** | `workers/`, `infrastructure/`, `docker-compose.yml` | File upload event → Kafka → Tika extract → chunk → embed → index into OpenSearch |
+| **Search** | `Search-Engine/` | REST query → Go Gateway → gRPC PyWorker → OpenSearch hybrid query → Redis cache |
 
-- OpenSearch (search backend)
-- OpenSearch Dashboards (optional UI)
-- PyWorker (Role 5 gRPC search worker)
-- Frontend (Next.js, HPE theme)
+---
 
-## Prerequisites
+## Architecture Overview
 
-- Docker Engine with Docker Compose v2
-- Optional: a Go API Gateway reachable from the frontend (not included here)
+```
+┌─────────────── INGESTION PIPELINE ───────────────────────────────┐
+│                                                                    │
+│  MinIO (S3)  ──PUT event──▶  Kafka (3-node)  ──▶  Ingestion      │
+│  :9000/:9001                 :29092               Worker          │
+│                                                    │              │
+│                              Model Server  ◀───────┤  (embed)    │
+│                              :8000 (text)           │              │
+│                              :8001 (image)          ▼              │
+│                                              OpenSearch            │
+│                              Tika  ◀──────── (extract)  :9200    │
+│                              :9998                  │              │
+│                                              Redis Cache           │
+└──────────────────────────────────────────── :6379 ───────────────┘
+                                                     │
+┌─────────────── SEARCH PIPELINE ──────────────────▼──────────────┐
+│                                                                    │
+│  Frontend (Next.js)  ──▶  Go Gateway  ──▶  PyWorker-2 (gRPC)    │
+│  :3000                     :8080            :50052                │
+│                              │                │                    │
+│                           Redis            OpenSearch             │
+│                         (cache HIT)      (kNN + BM25)            │
+│                           :6379             :9200                 │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Repository Structure
+
+```
+HPE/
+├── Search-Engine/                  # Search pipeline (Roles 4 & 5)
+│   ├── gateway/                    # Go API Gateway
+│   │   ├── cache/redis.go          # Redis cache — Steps 1 & 4 of search flow
+│   │   ├── handlers/search.go      # REST handler (HIT/MISS logic)
+│   │   ├── grpcclient/client.go    # gRPC client → PyWorker-2
+│   │   ├── merger/merger.go        # Top-K dedup + score sort
+│   │   ├── proto/                  # Generated gRPC stubs (Go)
+│   │   ├── main.go
+│   │   ├── Dockerfile
+│   │   └── go.mod
+│   ├── pyworker/                   # PyWorker-2 gRPC server (NLP + embed + search)
+│   │   ├── search_worker.py        # gRPC servicer
+│   │   ├── nlp_parser.py           # spaCy NLP parser
+│   │   ├── embedding_service.py    # SentenceTransformer (all-MiniLM-L6-v2)
+│   │   ├── config.py               # All env-var config
+│   │   ├── proto/                  # Generated gRPC stubs (Python)
+│   │   └── Dockerfile
+│   ├── frontend/                   # Next.js HPE-themed search UI
+│   ├── docker-compose.yml          # Search-side stack (OpenSearch + Redis + gateway + UI)
+│   └── .env.example
+│
+├── workers/
+│   ├── ingestion/                  # Ingestion worker (Kafka consumer)
+│   │   ├── main.py                 # Entry point — Kafka → process → index
+│   │   ├── tika_extractor.py       # Apache Tika text & metadata extraction
+│   │   ├── chunker.py              # Sliding-window text chunker
+│   │   ├── image_handler.py        # Image pipeline (resize → embed)
+│   │   ├── model_client.py         # HTTP client → model-server
+│   │   └── opensearch_client.py    # Bulk upsert into OpenSearch
+│   └── model-server/               # FastAPI embedding server
+│       ├── server.py               # /embed/text  /embed/image  endpoints
+│       ├── text_embedder.py        # SentenceTransformer (384-dim)
+│       ├── image_embedder.py       # CLIP / torchvision image embedder
+│       ├── main.py                 # Uvicorn entry
+│       └── load-balancer/nginx.conf
+│
+├── backend/
+│   ├── cache/redis_cache.py        # Python Redis cache layer (search results)
+│   └── search/opensearch_query_builder.py  # Hybrid BM25+kNN query reference
+│
+├── infrastructure/
+│   ├── opensearch/index-mapping.json  # kNN-enabled index schema (obsidian-docs)
+│   ├── kafka/                         # Kafka KRaft cluster configs + topic scripts
+│   ├── minio/                         # MinIO bucket + event-notification setup
+│   └── startup.sh                     # One-shot bootstrap script
+│
+├── tests/
+│   └── test_opensearch.py          # OpenSearch integration tests
+│
+├── docker-compose.yml              # Full ingestion-side stack (Kafka+MinIO+Tika+OS+Redis)
+├── requirements.txt                # Python dependencies (ingestion + model-server)
+├── pytest.ini
+└── .env.example                    # All environment variables documented
+```
+
+---
 
 ## Quick Start
+
+### Option A — Search pipeline only (no ingestion)
+
+Use this if OpenSearch is already populated (e.g., from another team's ingestion run).
 
 ```bash
 cd Search-Engine
 cp .env.example .env
+# Edit .env: set OPENSEARCH_HOST if OpenSearch is on another machine
+docker compose up --build
 ```
 
-Edit `.env` if you want to use an external Go gateway instead of the built-in proxy:
+Services started: `opensearch`, `opensearch-dashboards`, `redis`, `pyworker-2`, `go-gateway`, `frontend`
 
-```
-NEXT_PUBLIC_API_BASE=http://YOUR_GO_GATEWAY_HOST:PORT
-```
-
-Start the stack (separate containers with Role 5 names):
+### Option B — Full pipeline (ingestion + search)
 
 ```bash
-docker compose -p role5 -f docker-compose.yml up --build --force-recreate
+# 1. Copy and edit root env
+cp .env.example .env
+
+# 2. Start the full ingestion stack (Kafka, MinIO, Tika, OpenSearch, Redis)
+docker compose up --build -d
+
+# 3. Start the search stack
+cd Search-Engine
+cp .env.example .env
+docker compose up --build -d
 ```
+
+> **Note:** Both stacks share the same OpenSearch instance. In the default setup both `docker-compose.yml` files launch their own OpenSearch containers on port `9200`. For a fully integrated deployment, run only one OpenSearch and point the other via `OPENSEARCH_HOST`.
+
+---
 
 ## Service Ports
 
-- Frontend: http://localhost:3000
-- OpenSearch: http://localhost:9200
-- OpenSearch Dashboards: http://localhost:5601
-- gRPC Worker: 0.0.0.0:50052
+### Ingestion Stack (`docker-compose.yml`)
 
-## Notes
+| Service | Port(s) | Description |
+|---------|---------|-------------|
+| Kafka broker 1 | `29092` | External Kafka listener |
+| Kafka broker 2 | `29093` | External Kafka listener |
+| Kafka broker 3 | `29094` | External Kafka listener |
+| MinIO S3 API | `9000` | Object upload endpoint |
+| MinIO Console | `9001` | Web UI |
+| Apache Tika | `9998` | Text & metadata extraction |
+| OpenSearch | `9200` | Search database (shared) |
+| OpenSearch Dashboards | `5601` | Index inspection UI |
+| Redis | `6379` | Search result cache |
 
-- The frontend uses `/api/search` by default.
-- If `NEXT_PUBLIC_API_BASE` is set, it calls `GET /search?q=...` on that gateway instead.
-- The gRPC worker talks to OpenSearch directly and returns ranked results.
-- If you only want the gRPC worker and OpenSearch, you can comment out the `frontend` service in `docker-compose.yml`.
+### Search Stack (`Search-Engine/docker-compose.yml`)
 
-## Natural Language Search (Basic)
+| Service | Port | Description |
+|---------|------|-------------|
+| Frontend | `3000` | Next.js search UI |
+| Go Gateway | `8080` | REST API (`GET /search`, `GET /health`) |
+| PyWorker-2 | `50052` | gRPC — NLP parse → embed → OpenSearch |
+| OpenSearch | `9200` | Search database (shared) |
+| OpenSearch Dashboards | `5601` | Dev index UI |
+| Redis | `6379` | Search result cache |
 
-The frontend API route supports lightweight natural language parsing for demos. Examples:
+---
 
-- "retrieve me pdfs uploaded on may 7th"
-- "show images from may 7"
+## Environment Variables
 
-Current parsing support:
-
-- File types: pdf, images, documents (via content type)
-- Date: "Month Day" (uses current year, filters `last_modified`)
-
-Implementation lives in [Search-Engine/frontend/app/api/search/route.js](Search-Engine/frontend/app/api/search/route.js).
-
-## Index Requirement
-
-The search route expects an OpenSearch index named `object-storage-index`. If it does not exist, the API returns 502.
-
-Create the index if needed:
+Copy `.env.example` → `.env` and adjust as needed.
 
 ```bash
-curl -X PUT http://localhost:9200/object-storage-index -H 'Content-Type: application/json' -d '{"mappings":{"properties":{"object_name":{"type":"text","fields":{"keyword":{"type":"keyword"}}},"bucket":{"type":"keyword"},"size_bytes":{"type":"long"},"content_type":{"type":"keyword"},"last_modified":{"type":"date"},"etag":{"type":"keyword"},"extension":{"type":"keyword"},"indexed_at":{"type":"date"}}}}'
+# OpenSearch — must match the index created by ingestion pipeline
+OPENSEARCH_HOST=localhost
+OPENSEARCH_PORT=9200
+OPENSEARCH_INDEX=obsidian-docs
+
+# Search tuning
+SEARCH_KNN_K=50
+SEARCH_BM25_BOOST=0.4
+SEARCH_KNN_BOOST=0.6
+
+# Redis cache (Go Gateway Steps 1 & 4)
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_TTL_DEFAULT=300         # seconds — default query TTL
+REDIS_TTL_POPULAR=1800        # seconds — TTL for frequently hit queries
+REDIS_POPULAR_THRESHOLD=10    # hit count to qualify as "popular"
+
+# Ingestion tuning
+OPENSEARCH_BULK_CHUNK_SIZE=200
+OPENSEARCH_MAX_RETRIES=5
+
+# Kafka
+KAFKA_BOOTSTRAP_SERVERS=localhost:29092
+KAFKA_TOPIC=file-upload-events
+
+# MinIO
+MINIO_ENDPOINT=localhost:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin123
 ```
 
-## Stop
+---
+
+## OpenSearch Index
+
+The pipeline uses an index named **`obsidian-docs`** with kNN + BM25 hybrid mapping.
+
+The index is created automatically on startup by the `opensearch-init` service in the ingestion `docker-compose.yml`. The mapping lives in `infrastructure/opensearch/index-mapping.json`.
+
+To create it manually:
 
 ```bash
-docker compose -f docker-compose.yml down
+curl -X PUT http://localhost:9200/obsidian-docs \
+  -H 'Content-Type: application/json' \
+  -d @infrastructure/opensearch/index-mapping.json
+```
+
+---
+
+## How the Search Pipeline Works
+
+```
+1. Browser → Frontend (port 3000)
+2. Frontend → Go Gateway GET /search?q=<query>   (port 8080)
+3. Go Gateway → Redis: cache lookup by SHA-256(query)
+   └─ HIT  → return cached JSON immediately  [X-Cache: HIT]
+   └─ MISS → continue ↓
+4. Go Gateway → PyWorker-2 gRPC ProcessQuery
+5. PyWorker-2:
+   a. spaCy NLP parse  → intent text + keywords + filters
+   b. SentenceTransformer embed query → 384-dim vector
+   c. OpenSearch hybrid query (BM25 boost=0.4 + kNN boost=0.6)
+6. PyWorker-2 returns ranked proto results to Go Gateway
+7. Go Gateway merger: dedup by ID, sort by combined_score desc, trim to limit
+8. Go Gateway → Redis: store result with TTL    [X-Cache: MISS]
+9. Go Gateway → Frontend → render results
+```
+
+---
+
+## How the Ingestion Pipeline Works
+
+```
+1. Client uploads file to MinIO bucket "uploads"
+2. MinIO publishes s3:ObjectCreated event to Kafka topic "file-upload-events"
+3. Ingestion Worker (Python) consumes Kafka message:
+   a. Download file bytes from MinIO
+   b. Apache Tika: extract text + metadata
+   c. Route by content type:
+      - Image  → Model Server /embed/image → 384-dim vector → single chunk doc
+      - Text   → TextChunker (sliding window) → Model Server /embed/text → N chunk docs
+   d. OpenSearch bulk upsert (object_key/chunk_index = document ID, idempotent)
+```
+
+---
+
+## Natural Language Query Examples
+
+| Query | What PyWorker extracts |
+|-------|------------------------|
+| `quarterly report pdf` | keywords: `quarterly report` + `type:pdf` filter |
+| `images bigger than 10MB` | `type:image` + `size_gt:10MB` filter |
+| `contracts from last week` | keywords: `contracts` + `date:last_week` filter |
+| `invoices from May` | keywords: `invoices` + `month:may` filter |
+| `marketing deck .pptx` | keywords: `marketing deck` + `extension:pptx` filter |
+
+---
+
+## Stopping the Stacks
+
+```bash
+# Stop search stack
+cd Search-Engine && docker compose down
+
+# Stop ingestion stack (from repo root)
+docker compose down
+
+# Also remove all volumes (OpenSearch data, MinIO data, Redis data)
+docker compose down -v
+cd Search-Engine && docker compose down -v
+```
+
+---
+
+## Running Tests
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# OpenSearch integration tests (requires OpenSearch running on localhost:9200)
+pytest tests/test_opensearch.py -v
+
+# Full E2E pipeline test
+pytest workers/ingestion/test_e2e_full_pipeline.py -v
 ```
