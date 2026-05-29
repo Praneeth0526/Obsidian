@@ -216,11 +216,12 @@ services:
     environment:
       - TIKA_JAVA_OPTS=-Xmx1g
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:9998/tika > /dev/null 2>&1 || exit 1"]
+      # apache/tika has no wget/curl — use bash built-in TCP to check port 9998
+      test: ["CMD-SHELL", "bash -c 'echo -n > /dev/tcp/localhost/9998' 2>/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
-      retries: 3
-      start_period: 30s
+      retries: 5
+      start_period: 60s
     restart: unless-stopped
 
   # ===========================================================================

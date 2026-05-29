@@ -295,6 +295,93 @@ aws s3 sync /path/to/folder/ s3://uploads/ \
 
 ---
 
+## Debugging
+
+### OpenSearch
+
+```bash
+# Check cluster health
+curl -s http://localhost:9200/_cluster/health | python3 -m json.tool
+
+# Count indexed documents
+curl -s http://localhost:9200/obsidian-docs/_count | python3 -m json.tool
+
+# View latest 5 documents
+curl -s "http://localhost:9200/obsidian-docs/_search?pretty&size=5"
+
+# Search for a term
+curl -s "http://localhost:9200/obsidian-docs/_search?pretty" \
+  -H "Content-Type: application/json" \
+  -d '{"query": {"match": {"chunk_text": "your search term"}}}'
+
+# List all indices
+curl -s http://localhost:9200/_cat/indices?v
+```
+
+### Redis
+
+```bash
+# List all cached search keys
+docker exec obsidian-redis redis-cli KEYS "search:*"
+
+# Count cached entries
+docker exec obsidian-redis redis-cli DBSIZE
+
+# View a cached result (replace <key> with one from KEYS above)
+docker exec obsidian-redis redis-cli GET <key>
+
+# Cache hit/miss stats
+docker exec obsidian-redis redis-cli INFO stats | grep -E "keyspace_hits|keyspace_misses|used_memory_human"
+
+# Flush cache (force all misses — useful during testing)
+docker exec obsidian-redis redis-cli FLUSHDB
+```
+
+### Container health & logs
+
+```bash
+# Check all container statuses at a glance
+docker ps --format "table {{.Names}}\t{{.Status}}"
+
+# Tail logs for a specific service
+docker logs obsidian-ingestion-worker -f
+docker logs obsidian-tika -f
+docker logs obsidian-minio -f
+docker logs obsidian-opensearch -f
+docker logs obsidian-go-gateway -f
+
+# Inspect health check detail for a container
+docker inspect obsidian-tika --format '{{json .State.Health}}' | python3 -m json.tool
+```
+
+### Kafka
+
+```bash
+# List topics
+docker exec obsidian-kafka-1 /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka1:9092 --list
+
+# Watch upload events in real-time
+docker exec obsidian-kafka-1 /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server kafka1:9092 --topic file-upload-events --from-beginning
+
+# Check consumer lag (how far behind the ingestion worker is)
+docker exec obsidian-kafka-1 /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server kafka1:9092 --describe --group ingestion-worker
+```
+
+### MinIO
+
+```bash
+# List all uploaded files
+aws s3 ls s3://uploads/ --endpoint-url http://localhost:9000 --recursive
+
+# Web console — login: minioadmin / minioadmin123
+http://localhost:9001
+```
+
+---
+
 ## Stopping
 
 ```bash
