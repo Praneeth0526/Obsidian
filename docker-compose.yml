@@ -1,5 +1,9 @@
 services:
 
+  # ===========================================================================
+  # INFRASTRUCTURE LAYER
+  # ===========================================================================
+
   # ---------------------------------------------------------------------------
   # Kafka 1 — KRaft node
   # ---------------------------------------------------------------------------
@@ -101,7 +105,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # Kafka Init — creates topics on the 3-node cluster
-  # Mirrors kafka/topics.sh and kafka/kafka-topic.yaml
   # ---------------------------------------------------------------------------
   kafka-init:
     image: apache/kafka:3.8.1
@@ -151,7 +154,6 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin123
       MINIO_SITE_NAME: obsidian-minio
-      # Kafka event notification — publishes to file-upload-events on every PUT
       MINIO_NOTIFY_KAFKA_ENABLE_1: "on"
       MINIO_NOTIFY_KAFKA_BROKERS_1: "kafka1:9092,kafka2:9092,kafka3:9092"
       MINIO_NOTIFY_KAFKA_TOPIC_1: "file-upload-events"
@@ -221,8 +223,12 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # ===========================================================================
+  # SHARED DATA LAYER  (one instance shared by both pipelines)
+  # ===========================================================================
+
   # ---------------------------------------------------------------------------
-  # OpenSearch — vector + keyword search
+  # OpenSearch — kNN + BM25 hybrid search database
   # ---------------------------------------------------------------------------
   opensearch:
     image: opensearchproject/opensearch:2.19.1
@@ -248,7 +254,7 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # OpenSearch Init — creates the obsidian-docs index with the correct mapping
+  # OpenSearch Init — creates the obsidian-docs index with kNN mapping
   # ---------------------------------------------------------------------------
   opensearch-init:
     image: curlimages/curl:latest
@@ -270,7 +276,7 @@ services:
     restart: "no"
 
   # ---------------------------------------------------------------------------
-  # OpenSearch Dashboards — UI for OpenSearch
+  # OpenSearch Dashboards — UI for inspecting the index
   # ---------------------------------------------------------------------------
   opensearch-dashboards:
     image: opensearchproject/opensearch-dashboards:2.19.1
@@ -286,7 +292,7 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # Redis — search result cache
+  # Redis — search result cache (Steps 1 & 4 of search pipeline)
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7.2-alpine
@@ -304,6 +310,176 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # ===========================================================================
+  # INGESTION PIPELINE
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Model Server — FastAPI text + image embedding (384-dim)
+  # ---------------------------------------------------------------------------
+  model-server:
+    build:
+      context: .
+      dockerfile: workers/model-server/Dockerfile
+    image: hpe-model-server:latest
+    container_name: obsidian-model-server
+    ports:
+      - "8000:8000"
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+      - MODEL_SERVER_HOST=0.0.0.0
+      - MODEL_SERVER_PORT=8000
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Ingestion Worker — Kafka consumer → Tika → chunk → embed → OpenSearch
+  # ---------------------------------------------------------------------------
+  ingestion-worker:
+    build:
+      context: .
+      dockerfile: workers/ingestion/Dockerfile
+    image: hpe-ingestion-worker:latest
+    container_name: obsidian-ingestion-worker
+    environment:
+      # Kafka
+      KAFKA_BOOTSTRAP_SERVERS: kafka1:9092,kafka2:9092,kafka3:9092
+      KAFKA_GROUP_ID: ${KAFKA_GROUP_ID:-ingestion-worker}
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-file-upload-events}
+      # MinIO
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin123}
+      MINIO_SECURE: "false"
+      MINIO_PUBLIC_URL: http://minio:9000
+      # Tika
+      TIKA_SERVER_URL: http://tika:9998
+      # Model server
+      MODEL_SERVER_URL: http://model-server:8000
+      # OpenSearch
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCH_PORT: 9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-obsidian-docs}
+      OPENSEARCH_BULK_CHUNK_SIZE: ${OPENSEARCH_BULK_CHUNK_SIZE:-200}
+      OPENSEARCH_MAX_RETRIES: ${OPENSEARCH_MAX_RETRIES:-5}
+      OPENSEARCH_RETRY_BASE_DELAY: ${OPENSEARCH_RETRY_BASE_DELAY:-1.0}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      kafka1:
+        condition: service_healthy
+      kafka2:
+        condition: service_healthy
+      kafka3:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      tika:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      opensearch-init:
+        condition: service_completed_successfully
+      model-server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ===========================================================================
+  # SEARCH PIPELINE
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # PyWorker-2 — gRPC search worker: NLP parse → embed → OpenSearch hybrid query
+  # ---------------------------------------------------------------------------
+  pyworker-2:
+    build:
+      context: ./Search-Engine
+      dockerfile: pyworker/Dockerfile
+    image: hpe-pyworker-2:latest
+    container_name: obsidian-pyworker-2
+    environment:
+      GRPC_HOST: 0.0.0.0
+      GRPC_SEARCH_PORT: 50052
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCH_PORT: 9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-obsidian-docs}
+      SEARCH_KNN_K: ${SEARCH_KNN_K:-50}
+      SEARCH_BM25_BOOST: ${SEARCH_BM25_BOOST:-0.4}
+      SEARCH_KNN_BOOST: ${SEARCH_KNN_BOOST:-0.6}
+      SEARCH_DEFAULT_SIZE: ${SEARCH_DEFAULT_SIZE:-10}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    ports:
+      - "50052:50052"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      opensearch-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Go API Gateway — REST entry point with Redis cache (Steps 1 & 4)
+  # ---------------------------------------------------------------------------
+  go-gateway:
+    build:
+      context: ./Search-Engine
+      dockerfile: gateway/Dockerfile
+    image: hpe-go-gateway:latest
+    container_name: obsidian-go-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      GATEWAY_PORT: 8080
+      PYWORKER_HOST: pyworker-2
+      PYWORKER_PORT: 50052
+      # Redis cache
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_PASSWORD: ""
+      REDIS_TTL_DEFAULT: ${REDIS_TTL_DEFAULT:-300}
+      REDIS_TTL_POPULAR: ${REDIS_TTL_POPULAR:-1800}
+      REDIS_POPULAR_THRESHOLD: ${REDIS_POPULAR_THRESHOLD:-10}
+    depends_on:
+      pyworker-2:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Frontend — Next.js HPE-themed search UI
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./Search-Engine
+      dockerfile: frontend/Dockerfile
+    image: hpe-frontend:latest
+    container_name: obsidian-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8080}
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCH_PORT: 9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-obsidian-docs}
+    depends_on:
+      - go-gateway
+    restart: unless-stopped
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
 volumes:
   minio-data:
     name: obsidian-minio-data

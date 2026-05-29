@@ -92,7 +92,7 @@ HPE/
 ├── tests/
 │   └── test_opensearch.py          # OpenSearch integration tests
 │
-├── docker-compose.yml              # Full ingestion-side stack (Kafka+MinIO+Tika+OS+Redis)
+├── docker-compose.yml              # Unified full-stack compose — starts everything in one command
 ├── requirements.txt                # Python dependencies (ingestion + model-server)
 ├── pytest.ini
 └── .env.example                    # All environment variables documented
@@ -102,64 +102,38 @@ HPE/
 
 ## Quick Start
 
-### Option A — Search pipeline only (no ingestion)
-
-Use this if OpenSearch is already populated (e.g., from another team's ingestion run).
-
 ```bash
-cd Search-Engine
+# 1. Configure
 cp .env.example .env
-# Edit .env: set OPENSEARCH_HOST if OpenSearch is on another machine
-docker compose up --build
-```
+# Edit .env only if you need to change defaults (OpenSearch host, MinIO creds, etc.)
 
-Services started: `opensearch`, `opensearch-dashboards`, `redis`, `pyworker-2`, `go-gateway`, `frontend`
-
-### Option B — Full pipeline (ingestion + search)
-
-```bash
-# 1. Copy and edit root env
-cp .env.example .env
-
-# 2. Start the full ingestion stack (Kafka, MinIO, Tika, OpenSearch, Redis)
-docker compose up --build -d
-
-# 3. Start the search stack
-cd Search-Engine
-cp .env.example .env
+# 2. Start everything
 docker compose up --build -d
 ```
 
-> **Note:** Both stacks share the same OpenSearch instance. In the default setup both `docker-compose.yml` files launch their own OpenSearch containers on port `9200`. For a fully integrated deployment, run only one OpenSearch and point the other via `OPENSEARCH_HOST`.
+That's it. All 14 services — Kafka, MinIO, Tika, OpenSearch, Redis, ingestion worker, model server, PyWorker-2, Go Gateway, and the frontend — start together with proper dependency ordering.
 
----
+Open **http://localhost:3000** when the stack is up.
 
 ## Service Ports
 
-### Ingestion Stack (`docker-compose.yml`)
+All services run from the single root `docker-compose.yml`.
 
 | Service | Port(s) | Description |
 |---------|---------|-------------|
-| Kafka broker 1 | `29092` | External Kafka listener |
-| Kafka broker 2 | `29093` | External Kafka listener |
-| Kafka broker 3 | `29094` | External Kafka listener |
-| MinIO S3 API | `9000` | Object upload endpoint |
-| MinIO Console | `9001` | Web UI |
-| Apache Tika | `9998` | Text & metadata extraction |
-| OpenSearch | `9200` | Search database (shared) |
-| OpenSearch Dashboards | `5601` | Index inspection UI |
-| Redis | `6379` | Search result cache |
-
-### Search Stack (`Search-Engine/docker-compose.yml`)
-
-| Service | Port | Description |
-|---------|------|-------------|
-| Frontend | `3000` | Next.js search UI |
-| Go Gateway | `8080` | REST API (`GET /search`, `GET /health`) |
-| PyWorker-2 | `50052` | gRPC — NLP parse → embed → OpenSearch |
-| OpenSearch | `9200` | Search database (shared) |
-| OpenSearch Dashboards | `5601` | Dev index UI |
-| Redis | `6379` | Search result cache |
+| **Frontend** | `3000` | Next.js search UI |
+| **Go Gateway** | `8080` | REST API (`GET /search`, `GET /health`) |
+| **PyWorker-2** | `50052` | gRPC — NLP parse → embed → OpenSearch |
+| **Model Server** | `8000` | FastAPI text + image embedding |
+| **OpenSearch** | `9200` | Hybrid BM25 + kNN search database |
+| **OpenSearch Dashboards** | `5601` | Index inspection UI |
+| **Redis** | `6379` | Search result cache |
+| **Apache Tika** | `9998` | Text & metadata extraction |
+| **MinIO S3 API** | `9000` | Object upload endpoint |
+| **MinIO Console** | `9001` | MinIO web UI |
+| **Kafka broker 1** | `29092` | External Kafka listener |
+| **Kafka broker 2** | `29093` | External Kafka listener |
+| **Kafka broker 3** | `29094` | External Kafka listener |
 
 ---
 
@@ -266,18 +240,13 @@ curl -X PUT http://localhost:9200/obsidian-docs \
 
 ---
 
-## Stopping the Stacks
+## Stopping
 
 ```bash
-# Stop search stack
-cd Search-Engine && docker compose down
-
-# Stop ingestion stack (from repo root)
 docker compose down
 
 # Also remove all volumes (OpenSearch data, MinIO data, Redis data)
 docker compose down -v
-cd Search-Engine && docker compose down -v
 ```
 
 ---
