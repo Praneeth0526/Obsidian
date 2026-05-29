@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/hpe/search-engine/gateway/cache"
 	"github.com/hpe/search-engine/gateway/grpcclient"
 	"github.com/hpe/search-engine/gateway/merger"
 )
@@ -14,21 +15,22 @@ import (
 // SearchHandler holds dependencies for the search and health endpoints.
 type SearchHandler struct {
 	client *grpcclient.Client
+	cache  *cache.Client
 }
 
-// NewSearchHandler constructs a SearchHandler with the given gRPC client.
-func NewSearchHandler(client *grpcclient.Client) *SearchHandler {
-	return &SearchHandler{client: client}
+// NewSearchHandler constructs a SearchHandler with the given gRPC client and Redis cache.
+func NewSearchHandler(client *grpcclient.Client, redisCache *cache.Client) *SearchHandler {
+	return &SearchHandler{client: client, cache: redisCache}
 }
 
 // Search handles GET /search?q=<query>&limit=<n>
 //
-// Integration points for Role 3 (Redis caching):
+// Pipeline (matches Flow.png):
 //
-//	BEFORE the gRPC call  → check Redis cache by query hash
-//	AFTER  the gRPC call  → store merged result in Redis with TTL
-//
-// Those hooks are marked with "// [ROLE-3 HOOK]" comments below.
+//	Step 1 — Check Redis cache  → HIT: return immediately
+//	Step 2 — gRPC call to PyWorker-2 (NLP parse + embed + OpenSearch hybrid query)
+//	Step 3 — Merge & deduplicate results
+//	Step 4 — Store result in Redis with TTL
 func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {
@@ -46,16 +48,18 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[*] Search request: q=%q limit=%d", query, limit)
 
-	// [ROLE-3 HOOK] ── Cache check ─────────────────────────────────────────
-	// queryHash := cache.Hash(query)
-	// if cached, ok := cache.Get(queryHash); ok {
-	//     log.Printf("[*] Cache HIT for %q", query)
-	//     writeJSON(w, http.StatusOK, cached)
-	//     return
-	// }
-	// ──────────────────────────────────────────────────────────────────────
+	// ── Step 1: Redis cache check ─────────────────────────────────────────────
+	if cached, ok := h.cache.Get(query); ok {
+		log.Printf("[*] Cache HIT for %q", query)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "HIT")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(cached)
+		return
+	}
+	// ─────────────────────────────────────────────────────────────────────────
 
-	// Cache miss → call PyWorker-2 over gRPC
+	// ── Step 2: Cache miss → gRPC call to PyWorker-2 ─────────────────────────
 	protoResp, err := h.client.Search(query, int32(limit))
 	if err != nil {
 		log.Printf("[!] gRPC error: %v", err)
@@ -65,19 +69,21 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ── Step 3: Merge & deduplicate ───────────────────────────────────────────
 	result := merger.Merge(protoResp, limit)
 
-	// [ROLE-3 HOOK] ── Cache store ─────────────────────────────────────────
-	// cache.Set(queryHash, result, cache.DefaultTTL)
-	// ──────────────────────────────────────────────────────────────────────
+	// ── Step 4: Store in Redis cache ──────────────────────────────────────────
+	h.cache.Set(query, result)
+	// ─────────────────────────────────────────────────────────────────────────
 
 	log.Printf("[+] Returning %d results for %q (intent: %q)",
 		len(result.Results), query, result.IntentText)
 
+	w.Header().Set("X-Cache", "MISS")
 	writeJSON(w, http.StatusOK, result)
 }
 
-// Health handles GET /health — checks gRPC reachability with a no-op query.
+// Health handles GET /health — checks gRPC and Redis reachability.
 func (h *SearchHandler) Health(w http.ResponseWriter, r *http.Request) {
 	_, err := h.client.Search("health-check", 1)
 	status := "ok"
@@ -91,9 +97,17 @@ func (h *SearchHandler) Health(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[!] Health check — PyWorker-2 unreachable: %v", err)
 	}
 
+	redisStatus := "reachable"
+	if !h.cache.Healthy() {
+		redisStatus = "unreachable"
+		// Redis failure is non-fatal — search still works, just uncached
+		log.Printf("[WARN] Health check — Redis unreachable")
+	}
+
 	writeJSON(w, httpStatus, map[string]string{
 		"status":   status,
 		"pyworker": pyworkerStatus,
+		"redis":    redisStatus,
 	})
 }
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/hpe/search-engine/gateway/cache"
 	"github.com/hpe/search-engine/gateway/grpcclient"
 	"github.com/hpe/search-engine/gateway/handlers"
 )
@@ -15,7 +16,11 @@ func main() {
 	pyworkerHost := getEnv("PYWORKER_HOST", "localhost")
 	pyworkerPort := getEnv("PYWORKER_PORT", "50052")
 
-	// Establish gRPC connection to PyWorker-2
+	// ── Redis cache (Step 1 & 4 of search pipeline) ───────────────────────────
+	redisCache := cache.New()
+	defer redisCache.Close()
+
+	// ── gRPC connection to PyWorker-2 ─────────────────────────────────────────
 	pyworkerAddr := fmt.Sprintf("%s:%s", pyworkerHost, pyworkerPort)
 	client, err := grpcclient.New(pyworkerAddr)
 	if err != nil {
@@ -25,10 +30,10 @@ func main() {
 
 	log.Printf("[+] Connected to PyWorker-2 at %s", pyworkerAddr)
 
-	// Register HTTP handlers
+	// ── HTTP routes ───────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
 
-	searchHandler := handlers.NewSearchHandler(client)
+	searchHandler := handlers.NewSearchHandler(client, redisCache)
 	mux.HandleFunc("GET /search", searchHandler.Search)
 	mux.HandleFunc("GET /health", searchHandler.Health)
 

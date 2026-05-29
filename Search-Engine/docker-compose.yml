@@ -7,10 +7,17 @@ services:
       DISABLE_SECURITY_PLUGIN: "true"
       DISABLE_INSTALL_DEMO_CONFIG: "true"
       OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      plugins.ml_commons.only_run_on_ml_node: "false"
     ports:
       - "9200:9200"
     volumes:
       - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     restart: unless-stopped
 
   opensearch-dashboards:
@@ -36,14 +43,16 @@ services:
       GRPC_SEARCH_PORT: 50052
       OPENSEARCH_HOST: opensearch
       OPENSEARCH_PORT: 9200
-      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-object-storage-index}
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-obsidian-docs}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
     ports:
       - "50052:50052"
     depends_on:
-      - opensearch
+      opensearch:
+        condition: service_healthy
     restart: unless-stopped
 
   go-gateway:
@@ -58,8 +67,17 @@ services:
       GATEWAY_PORT: 8080
       PYWORKER_HOST: pyworker-2
       PYWORKER_PORT: 50052
+      # Redis cache config (consumed by gateway/cache package)
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_PASSWORD: ""
+      REDIS_TTL_DEFAULT: ${REDIS_TTL_DEFAULT:-300}
+      REDIS_TTL_POPULAR: ${REDIS_TTL_POPULAR:-1800}
+      REDIS_POPULAR_THRESHOLD: ${REDIS_POPULAR_THRESHOLD:-10}
     depends_on:
       - pyworker-2
+      - redis
     restart: unless-stopped
 
   frontend:
@@ -75,10 +93,30 @@ services:
       NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8080}
       OPENSEARCH_HOST: opensearch
       OPENSEARCH_PORT: 9200
-      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-object-storage-index}
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-obsidian-docs}
     depends_on:
       - go-gateway
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # Redis — search result cache (Step 1 & 4 in Flow.png)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --loglevel notice
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   opensearch-data:
+  redis-data:
