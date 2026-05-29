@@ -88,10 +88,14 @@ Go Gateway :8080
                 ▼                        │
          PyWorker-2 :50052               │
            │ a. spaCy NLP parse          │
+           │    · exact dates → range    │
+           │    · relative dates/type/   │
+           │      size → filter clauses  │
            │ b. SentenceTransformer      │
            │    embed (384-dim)          │
-           │ c. OpenSearch hybrid        │
-           │    BM25 (0.4) + kNN (0.6)  │
+           │ c. OpenSearch query:        │
+           │    keywords → multi_match   │
+           │    filters only → match_all │
            ▼                             │
          OpenSearch :9200                │
            │ Top-K results               │
@@ -117,6 +121,8 @@ Go Gateway :8080
 | `contracts from last week` | keywords: `contracts` + `date:last_week` |
 | `invoices from May` | keywords: `invoices` + `month:may` |
 | `marketing deck .pptx` | keywords: `marketing deck` + `extension:pptx` |
+| `files uploaded on May 15th` | `exact_date:may_15_<year>` → 24-hour range filter |
+| `pdfs` | `type:pdf` filter → `match_all` (no keywords required) |
 
 ---
 

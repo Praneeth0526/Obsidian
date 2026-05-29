@@ -119,7 +119,9 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
     ) -> List[Dict[str, object]]:
         """Query OpenSearch for keyword results."""
         query_text = " ".join(keywords) if keywords else query.strip()
-        if not query_text:
+        
+        # If no query text AND no filters, return empty
+        if not query_text and not filters:
             return []
 
         return self._keyword_search_opensearch(query_text, filters, limit)
@@ -133,25 +135,30 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
         """Query OpenSearch for keyword results."""
         filter_clauses = self._build_filter_clauses(filters)
 
+        if query_text:
+            must_clause = [
+                {
+                    "multi_match": {
+                        "query": query_text,
+                        "fields": [
+                            "filename^3",
+                            "object_key^2",
+                            "chunk_text",
+                            "extension",
+                            "bucket",
+                            "mime_type",
+                        ],
+                    }
+                }
+            ]
+        else:
+            must_clause = [{"match_all": {}}]
+
         body = {
             "size": limit,
             "query": {
                 "bool": {
-                    "must": [
-                        {
-                            "multi_match": {
-                                "query": query_text,
-                                "fields": [
-                                    "filename^3",
-                                    "object_key^2",
-                                    "chunk_text",
-                                    "extension",
-                                    "bucket",
-                                    "mime_type",
-                                ],
-                            }
-                        }
-                    ],
+                    "must": must_clause,
                     "filter": filter_clauses,
                 }
             },
@@ -195,7 +202,12 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
                 clauses.append({"term": {"extension": extension}})
             elif filter_str.startswith("type:"):
                 file_type = filter_str.split(":", 1)[1]
-                clauses.append({"prefix": {"content_type": file_type}})
+                if file_type == "pdf":
+                    clauses.append({"term": {"extension": "pdf"}})
+                elif file_type == "document":
+                    clauses.append({"prefix": {"mime_type": "application/"}})
+                else:
+                    clauses.append({"prefix": {"mime_type": file_type}})
             elif filter_str.startswith("size:"):
                 range_clause = self._size_filter_to_range(filter_str)
                 if range_clause:
@@ -204,11 +216,32 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
                 range_clause = self._date_filter_to_range(filter_str)
                 if range_clause:
                     clauses.append(range_clause)
+            elif filter_str.startswith("exact_date:"):
+                range_clause = self._exact_date_to_range(filter_str)
+                if range_clause:
+                    clauses.append(range_clause)
             elif filter_str.startswith("month:"):
                 # Month filtering requires indexed month data; skip for now.
                 continue
         return clauses
 
+    def _exact_date_to_range(self, filter_str: str) -> Dict[str, object]:
+        parts = filter_str.split(":", 1)[1].split("_")
+        if len(parts) != 3: return {}
+        month_str, day_str, year_str = parts
+        
+        month_map = {"jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3, "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7, "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12}
+        month = month_map.get(month_str.lower(), 1)
+        day = int(day_str)
+        year = int(year_str)
+        
+        from datetime import datetime, timedelta
+        try:
+            start = datetime(year, month, day)
+            end = start + timedelta(days=1)
+            return {"range": {"uploaded_at": {"gte": start.isoformat() + "Z", "lt": end.isoformat() + "Z"}}}
+        except ValueError:
+            return {}
 
     def _size_filter_to_range(self, filter_str: str) -> Dict[str, object]:
         """Convert size filter to OpenSearch range clause."""
@@ -230,7 +263,7 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
         """Convert date filter to OpenSearch range clause."""
         date_key = filter_str.split(":", 1)[1]
         start, end = self.parser.get_date_range(date_key)
-        return {"range": {"last_modified": {"gte": start.isoformat(), "lte": end.isoformat()}}}
+        return {"range": {"uploaded_at": {"gte": start.isoformat(), "lte": end.isoformat()}}}
 
     def _parse_size_bytes(self, raw_value: str) -> int:
         """Parse size string like 10MB into bytes."""

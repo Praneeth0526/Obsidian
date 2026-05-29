@@ -153,6 +153,14 @@ class NLPQueryParser:
 
     def _extract_date_filters(self, query: str) -> List[str]:
         filters = []
+        exact_date_pattern = r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?\b"
+        exact_match = re.search(exact_date_pattern, query, re.IGNORECASE)
+        if exact_match:
+            month = exact_match.group(1).lower()
+            day = exact_match.group(2)
+            year = exact_match.group(3) or str(datetime.now().year)
+            filters.append(f"exact_date:{month}_{day}_{year}")
+
         for pattern, filter_type in self.DATE_PATTERNS:
             match = re.search(pattern, query, re.IGNORECASE)
             if match:
@@ -183,6 +191,8 @@ class NLPQueryParser:
     def _strip_filter_text(self, query: str) -> str:
         """Remove date/size/type pattern text before passing to spaCy."""
         text = query
+        exact_date_pattern = r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?\b"
+        text = re.sub(exact_date_pattern, " ", text, flags=re.IGNORECASE)
         for pattern, _ in self.DATE_PATTERNS:
             text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
         for pattern, _ in self.SIZE_PATTERNS:

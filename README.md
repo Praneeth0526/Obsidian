@@ -201,9 +201,14 @@ curl -X PUT http://localhost:9200/obsidian-docs \
    └─ MISS → continue ↓
 4. Go Gateway → PyWorker-2 gRPC ProcessQuery
 5. PyWorker-2:
-   a. spaCy NLP parse  → intent text + keywords + filters
+   a. spaCy NLP parse → intent text + keywords + filters
+      - Exact calendar dates (e.g. "May 15th") → 24-hour range filter
+      - Relative dates (last week / month / year / yesterday / today)
+      - File type, extension, and size filters
    b. SentenceTransformer embed query → 384-dim vector
-   c. OpenSearch hybrid query (BM25 boost=0.4 + kNN boost=0.6)
+   c. OpenSearch query:
+      - Keywords present → multi_match across filename, chunk_text, mime_type, etc.
+      - Filter-only query (no keywords) → match_all + filter clauses
 6. PyWorker-2 returns ranked proto results to Go Gateway
 7. Go Gateway merger: dedup by ID, sort by combined_score desc, trim to limit
 8. Go Gateway → Redis: store result with TTL    [X-Cache: MISS]
@@ -237,6 +242,8 @@ curl -X PUT http://localhost:9200/obsidian-docs \
 | `contracts from last week` | keywords: `contracts` + `date:last_week` filter |
 | `invoices from May` | keywords: `invoices` + `month:may` filter |
 | `marketing deck .pptx` | keywords: `marketing deck` + `extension:pptx` filter |
+| `files uploaded on May 15th` | `exact_date:may_15_<year>` filter → 24-hour range query |
+| `pdfs` | `type:pdf` filter → `match_all` (no keywords needed) |
 
 ---
 
