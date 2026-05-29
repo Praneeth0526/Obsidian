@@ -10,8 +10,14 @@ RUN apk add --no-cache protobuf protobuf-dev curl && \
 # Copy module files first for better layer caching
 COPY gateway/go.mod gateway/go.sum* ./
 
-# Copy proto and generate Go stubs
-COPY gateway/proto/search.proto ./proto/search.proto
+
+# Download dependencies
+RUN go mod download
+
+# Copy source and build the binary
+COPY gateway/ ./
+
+# Generate Go stubs from proto (run after COPY so we overwrite any checked-in files)
 RUN protoc \
     --go_out=. \
     --go_opt=paths=source_relative \
@@ -19,11 +25,6 @@ RUN protoc \
     --go-grpc_opt=paths=source_relative \
     proto/search.proto
 
-# Download dependencies
-RUN go mod download
-
-# Copy source and build the binary
-COPY gateway/ ./
 RUN go build -o gateway-server .
 
 # ── Runtime stage ─────────────────────────────────────────────────────

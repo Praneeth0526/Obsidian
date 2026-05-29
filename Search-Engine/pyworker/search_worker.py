@@ -118,7 +118,7 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
         limit: int,
     ) -> List[Dict[str, object]]:
         """Query OpenSearch for keyword results."""
-        query_text = query.strip() or " ".join(keywords)
+        query_text = " ".join(keywords) if keywords else query.strip()
         if not query_text:
             return []
 
@@ -142,10 +142,12 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
                             "multi_match": {
                                 "query": query_text,
                                 "fields": [
-                                    "object_name^3",
-                                    "extension^2",
+                                    "filename^3",
+                                    "object_key^2",
+                                    "chunk_text",
+                                    "extension",
                                     "bucket",
-                                    "content_type",
+                                    "mime_type",
                                 ],
                             }
                         }
@@ -156,7 +158,9 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
         }
 
         try:
+            print(f"[*] Executing OpenSearch query: {body}")
             response = self.opensearch.search(index=OPENSEARCH_INDEX, body=body)
+            print(f"[*] OpenSearch response hits: {response.get('hits', {}).get('total', {})}")
         except Exception as exc:
             print(f"[!] OpenSearch search failed: {exc}")
             return []
@@ -171,12 +175,12 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
                     "semantic_score": 0.0,
                     "keyword_score": float(hit.get("_score", 0.0) or 0.0),
                     "combined_score": float(hit.get("_score", 0.0) or 0.0),
-                    "object_name": source.get("object_name", ""),
+                    "object_name": source.get("filename", source.get("object_key", "")),
                     "bucket": source.get("bucket", ""),
                     "size_bytes": int(source.get("size_bytes", 0) or 0),
-                    "content_type": source.get("content_type", ""),
+                    "content_type": source.get("mime_type", ""),
                     "extension": source.get("extension", ""),
-                    "last_modified": source.get("last_modified", ""),
+                    "last_modified": source.get("uploaded_at", ""),
                     "highlights": {},
                 }
             )

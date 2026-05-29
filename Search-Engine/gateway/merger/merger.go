@@ -46,14 +46,15 @@ func Merge(proto *pb.SearchQueryResponse, limit int) SearchResponse {
 		limit = maxLimit
 	}
 
-	// Convert proto results → gateway results, deduplicate by ID
+	// Convert proto results → gateway results, deduplicate by Bucket + ObjectName
 	seen := make(map[string]struct{}, len(proto.Results))
 	unique := make([]Result, 0, len(proto.Results))
 	for _, r := range proto.Results {
-		if _, dup := seen[r.Id]; dup {
+		fileKey := r.Bucket + "/" + r.ObjectName
+		if _, dup := seen[fileKey]; dup {
 			continue
 		}
-		seen[r.Id] = struct{}{}
+		seen[fileKey] = struct{}{}
 		unique = append(unique, Result{
 			ID:            r.Id,
 			ObjectName:    r.ObjectName,

@@ -60,7 +60,7 @@ class IngestionWorker:
         )
 
         # ── Processing Components ──────────────────────────────────────────────
-        self.tika_extractor = TikaExtractor(tika_url=os.environ.get("TIKA_URL", "http://localhost:9998"))
+        self.tika_extractor = TikaExtractor(tika_url=os.environ.get("TIKA_SERVER_URL", "http://localhost:9998"))
         self.text_chunker   = TextChunker()
         self.image_handler  = ImageHandler()
         self.model_client   = ModelClient()  # Uses MODEL_SERVER_URL env, defaults to http://localhost:8000

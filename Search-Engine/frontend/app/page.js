@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
+const API_BASE = "http://localhost:8080";
 
 const SUGGESTIONS = [
   "invoice pdf",

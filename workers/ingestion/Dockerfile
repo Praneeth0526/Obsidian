@@ -9,9 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies from root requirements.txt
-# (Docker build context is the repo root, so requirements.txt is at .)
-COPY requirements.txt /requirements.txt
+# Install Python dependencies from local requirements.txt
+COPY workers/ingestion/requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 
 # Copy worker source

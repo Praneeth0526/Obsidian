@@ -93,7 +93,7 @@ HPE/
 │   └── test_opensearch.py          # OpenSearch integration tests
 │
 ├── docker-compose.yml              # Unified full-stack compose — starts everything in one command
-├── requirements.txt                # Python dependencies (ingestion + model-server)
+├── requirements.txt                # Python dependencies for ML (model-server + pyworker)
 ├── pytest.ini
 └── .env.example                    # All environment variables documented
 ```
@@ -349,6 +349,7 @@ docker logs obsidian-tika -f
 docker logs obsidian-minio -f
 docker logs obsidian-opensearch -f
 docker logs obsidian-go-gateway -f
+docker logs obsidian-pyworker-2 -f
 
 # Inspect health check detail for a container
 docker inspect obsidian-tika --format '{{json .State.Health}}' | python3 -m json.tool

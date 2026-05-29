@@ -417,6 +417,7 @@ services:
       SEARCH_DEFAULT_SIZE: ${SEARCH_DEFAULT_SIZE:-10}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PYTHONUNBUFFERED: 1
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
     ports:
