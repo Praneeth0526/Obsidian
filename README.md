@@ -240,6 +240,61 @@ curl -X PUT http://localhost:9200/obsidian-docs \
 
 ---
 
+## Uploading Files with AWS CLI
+
+MinIO exposes an S3-compatible API on `http://localhost:9000`. Point the AWS CLI at it using `--endpoint-url`.
+
+### 1. One-time configuration
+
+```bash
+aws configure set aws_access_key_id     minioadmin
+aws configure set aws_secret_access_key minioadmin123
+aws configure set default.region        us-east-1
+```
+
+> The region value is ignored by MinIO but required by the AWS CLI — any string works.
+
+### 2. Upload a single file
+
+```bash
+aws s3 cp /path/to/your/file.pdf s3://uploads/file.pdf \
+  --endpoint-url http://localhost:9000
+```
+
+### 3. Upload an entire folder
+
+```bash
+aws s3 cp /path/to/folder/ s3://uploads/ \
+  --recursive \
+  --endpoint-url http://localhost:9000
+```
+
+### 4. Upload with a subfolder prefix (recommended for organisation)
+
+```bash
+aws s3 cp /path/to/folder/ s3://uploads/my-project/ \
+  --recursive \
+  --endpoint-url http://localhost:9000
+```
+
+### 5. Useful commands
+
+```bash
+# List all files in the bucket
+aws s3 ls s3://uploads/ --endpoint-url http://localhost:9000 --recursive
+
+# Delete a file
+aws s3 rm s3://uploads/file.pdf --endpoint-url http://localhost:9000
+
+# Sync a local folder (only uploads changed/new files)
+aws s3 sync /path/to/folder/ s3://uploads/ \
+  --endpoint-url http://localhost:9000
+```
+
+> **How it triggers ingestion:** Every `s3 cp` / `s3 sync` PUT fires a MinIO event → Kafka `file-upload-events` topic → Ingestion Worker downloads the file, extracts text (Tika), chunks it, embeds it (Model Server), and indexes it into OpenSearch. The file becomes searchable within seconds.
+
+---
+
 ## Stopping
 
 ```bash
