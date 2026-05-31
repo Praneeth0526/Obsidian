@@ -7,13 +7,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies from root requirements.txt
-# (Docker build context is the repo root)
-COPY requirements.txt /requirements.txt
-RUN pip install --no-cache-dir -r /requirements.txt
-
-# Copy model-server source
+# Copy model-server source first (build context is repo root)
 COPY workers/model-server/ .
+
+# Install only the model-server's own dependencies.
+# --timeout 300 / --retries 5 guard against slow networks when
+# downloading large ML wheels (torch, transformers, timm).
+RUN pip install --no-cache-dir --timeout 300 --retries 5 -r requirements.txt
 
 EXPOSE 8000
 
