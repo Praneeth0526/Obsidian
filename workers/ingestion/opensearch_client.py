@@ -1,7 +1,7 @@
 """
 workers/ingestion/opensearch_client.py
 =======================================
-Industry-grade OpenSearch client for the Obsidian ingestion pipeline.
+Industry-grade OpenSearch client for the HPE Search ingestion pipeline.
 
 Responsibilities
 ----------------
@@ -61,14 +61,14 @@ def _get_logger(name: str) -> logging.Logger:
     logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
     return logger
 
-log = _get_logger("obsidian.opensearch_client")
+log = _get_logger("hpe_search.opensearch_client")
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 OPENSEARCH_HOST  = os.getenv("OPENSEARCH_HOST", "localhost")
 OPENSEARCH_PORT  = int(os.getenv("OPENSEARCH_PORT", "9200"))
-INDEX_NAME       = os.getenv("OPENSEARCH_INDEX", "obsidian-files")
+INDEX_NAME       = os.getenv("OPENSEARCH_INDEX", "hpe-search-docs")
 BULK_CHUNK_SIZE  = int(os.getenv("OPENSEARCH_BULK_CHUNK_SIZE", "200"))
 MAX_RETRIES      = int(os.getenv("OPENSEARCH_MAX_RETRIES", "5"))
 RETRY_BASE_DELAY = float(os.getenv("OPENSEARCH_RETRY_BASE_DELAY", "1.0"))  # seconds

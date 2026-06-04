@@ -48,14 +48,7 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
 
     def ProcessQuery(self, request, context):
         """
-        Process a search query and return ranked hybrid results.
-
-        Args:
-            request: SearchQueryRequest with query string and limit
-            context: gRPC context
-
-        Returns:
-            SearchQueryResponse with ranked results
+        Process a search query and return ranked hybrid kNN + BM25 results.
         """
         query = request.query or ""
         limit = request.limit if request.limit > 0 else DEFAULT_LIMIT
@@ -67,10 +60,10 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
         keywords = parse_result["keywords"]
         filters = parse_result["filters"]
 
-        # Embedding is retained for future vector search in OpenSearch if enabled
-        _ = self.embedding_service.encode(intent_text)
+        # Encode the intent text into a vector embedding for semantic search
+        query_vector = self.embedding_service.encode(intent_text)
 
-        keyword_results = self._keyword_search(query, keywords, filters, limit)
+        results = self._hybrid_search(query, keywords, filters, query_vector, intent_text, limit)
 
         response_results = [
             search_pb2.SearchResult(
@@ -86,7 +79,7 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
                 combined_score=item.get("combined_score", 0.0),
                 highlights=item.get("highlights", {}),
             )
-            for item in keyword_results
+            for item in results
         ]
 
         return search_pb2.SearchQueryResponse(
@@ -106,9 +99,128 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
             "filters": filters,
         }
 
-    def _semantic_search(self, vector: List[float], limit: int) -> List[Dict[str, object]]:
-        """Placeholder for future vector search if OpenSearch kNN is enabled."""
-        return []
+    def _hybrid_search(
+        self,
+        raw_query: str,
+        keywords: List[str],
+        filters: List[str],
+        query_vector: List[float],
+        intent_text: str,
+        limit: int,
+    ) -> List[Dict[str, object]]:
+        """Run kNN semantic search and BM25 keyword search, merge and re-rank."""
+        knn_boost = float(os.environ.get("SEARCH_KNN_BOOST", "0.6"))
+        bm25_boost = float(os.environ.get("SEARCH_BM25_BOOST", "0.4"))
+        knn_k = int(os.environ.get("SEARCH_KNN_K", "50"))
+
+        filter_clauses = self._build_filter_clauses(filters)
+        query_text = " ".join(keywords)
+
+        # ── kNN semantic search ──────────────────────────────────────────────
+        knn_hits: Dict[str, Dict] = {}
+        use_knn = bool(query_vector) and bool(intent_text.strip())
+        if use_knn:
+            knn_body = {
+                "size": knn_k,
+                "query": {
+                    "knn": {
+                        "embedding": {
+                            "vector": query_vector,
+                            "k": knn_k,
+                        }
+                    }
+                },
+                "_source": True,
+            }
+            if filter_clauses:
+                knn_body["post_filter"] = {"bool": {"filter": filter_clauses}}
+            try:
+                resp = self.opensearch.search(index=OPENSEARCH_INDEX, body=knn_body)
+                for hit in resp.get("hits", {}).get("hits", []):
+                    doc_id = hit["_id"]
+                    knn_hits[doc_id] = {
+                        "hit": hit,
+                        "knn_score": float(hit.get("_score") or 0.0),
+                    }
+            except Exception as exc:
+                print(f"[!] kNN search failed: {exc}")
+
+        # ── BM25 keyword search ──────────────────────────────────────────────
+        bm25_hits: Dict[str, Dict] = {}
+        if query_text:
+            must_clause = [{"multi_match": {"query": query_text, "fields": ["filename^3", "object_key^2", "chunk_text", "extension", "bucket", "mime_type"]}}]
+        else:
+            must_clause = [{"match_all": {}}]
+        bm25_body = {"size": limit * 3, "query": {"bool": {"must": must_clause, "filter": filter_clauses}}}
+        try:
+            resp = self.opensearch.search(index=OPENSEARCH_INDEX, body=bm25_body)
+            for hit in resp.get("hits", {}).get("hits", []):
+                doc_id = hit["_id"]
+                bm25_hits[doc_id] = {
+                    "hit": hit,
+                    "bm25_score": float(hit.get("_score") or 0.0),
+                }
+        except Exception as exc:
+            print(f"[!] BM25 search failed: {exc}")
+
+        # ── Normalise scores ─────────────────────────────────────────────────
+        def _normalize(scores: List[float]) -> List[float]:
+            if not scores: return scores
+            max_s = max(scores) or 1.0
+            return [s / max_s for s in scores]
+
+        knn_ids   = list(knn_hits.keys())
+        bm25_ids  = list(bm25_hits.keys())
+        knn_norms  = _normalize([knn_hits[i]["knn_score"]  for i in knn_ids])
+        bm25_norms = _normalize([bm25_hits[i]["bm25_score"] for i in bm25_ids])
+        knn_norm_map  = dict(zip(knn_ids,  knn_norms))
+        bm25_norm_map = dict(zip(bm25_ids, bm25_norms))
+
+        # ── Merge and rank ───────────────────────────────────────────────────
+        all_ids = set(knn_ids) | set(bm25_ids)
+        merged: List[Dict] = []
+        for doc_id in all_ids:
+            knn_entry  = knn_hits.get(doc_id,  {})
+            bm25_entry = bm25_hits.get(doc_id, {})
+            hit = knn_entry.get("hit") or bm25_entry.get("hit")
+            knn_s  = knn_norm_map.get(doc_id,  0.0)
+            bm25_s = bm25_norm_map.get(doc_id, 0.0)
+            combined = knn_boost * knn_s + bm25_boost * bm25_s
+            source = hit.get("_source", {})
+            merged.append({
+                "id": doc_id,
+                "object_key": source.get("object_key", doc_id),
+                "semantic_score": round(knn_s,  4),
+                "keyword_score":  round(bm25_s, 4),
+                "combined_score": round(combined, 4),
+                "object_name": source.get("filename", source.get("object_key", "")),
+                "bucket":       source.get("bucket", ""),
+                "size_bytes":   int(source.get("size_bytes", 0) or 0),
+                "content_type": source.get("mime_type", ""),
+                "extension":    source.get("extension", ""),
+                "last_modified": source.get("uploaded_at", ""),
+                "highlights":   {},
+            })
+
+        # ── Deduplicate: keep one result per file (best chunk wins) ──────────
+        merged.sort(key=lambda x: x["combined_score"], reverse=True)
+
+        # When query has intent text, filter out irrelevant matches below threshold.
+        # When filter-only (no intent), show all matching docs.
+        if intent_text.strip():
+            merged = [item for item in merged if item["combined_score"] >= 0.55]
+
+        seen_files: set = set()
+        deduplicated: List[Dict] = []
+        for item in merged:
+            file_key = item.get("object_key", item["id"])
+            if file_key not in seen_files:
+                seen_files.add(file_key)
+                deduplicated.append(item)
+
+        return deduplicated[:limit]
+
+
 
     def _keyword_search(
         self,

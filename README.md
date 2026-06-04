@@ -1,11 +1,31 @@
 # HPE Enterprise Search Engine
 
-A production-grade, hybrid (BM25 + kNN) enterprise search pipeline built on OpenSearch, Redis, Kafka, and MinIO. The system is split into two co-operating pipelines:
+A production-grade, hybrid (BM25 + kNN) enterprise search pipeline built on OpenSearch, Redis, Kafka, and MinIO — deployable via **Docker Compose** (local dev) or **Minikube / Kubernetes** (server).
 
 | Pipeline | Directory | What it does |
 |----------|-----------|--------------|
-| **Ingestion** | `workers/`, `infrastructure/`, `docker-compose.yml` | File upload event → Kafka → Tika extract → chunk → embed → index into OpenSearch |
+| **Ingestion** | `workers/`, `infrastructure/`, `docker-compose.yml` | File upload → Kafka → Tika extract → chunk → embed → OpenSearch |
 | **Search** | `Search-Engine/` | REST query → Go Gateway → gRPC PyWorker → OpenSearch hybrid query → Redis cache |
+
+---
+
+## Table of Contents
+
+1. [Architecture Overview](#architecture-overview)
+2. [Prerequisites](#prerequisites)
+   - [Common Requirements](#common-requirements)
+   - [Docker Compose deployment](#docker-compose-deployment)
+   - [Minikube deployment](#minikube-deployment)
+3. [Repository Structure](#repository-structure)
+4. [Quick Start — Docker Compose](#quick-start--docker-compose)
+5. [Quick Start — Minikube](#quick-start--minikube)
+6. [Service Ports](#service-ports)
+7. [Environment Variables](#environment-variables)
+8. [OpenSearch Index](#opensearch-index)
+9. [How the Pipelines Work](#how-the-search-pipeline-works)
+10. [Uploading Files](#uploading-files-with-aws-cli)
+11. [Debugging](#debugging)
+12. [Running Tests](#running-tests)
 
 ---
 
@@ -18,14 +38,12 @@ A production-grade, hybrid (BM25 + kNN) enterprise search pipeline built on Open
 │  :9000/:9001                 :29092               Worker          │
 │                                                    │              │
 │                              Model Server  ◀───────┤  (embed)    │
-│                              :8000 (text)           │              │
-│                              :8001 (image)          ▼              │
-│                                              OpenSearch            │
-│                              Tika  ◀──────── (extract)  :9200    │
+│                              :8000 (text+image)     │              │
+│                                                     ▼              │
+│                              Tika  ◀──────── OpenSearch :9200    │
 │                              :9998                  │              │
-│                                              Redis Cache           │
-└──────────────────────────────────────────── :6379 ───────────────┘
-                                                     │
+└──────────────────────────────────────────── Redis :6379 ─────────┘
+                                                      │
 ┌─────────────── SEARCH PIPELINE ──────────────────▼──────────────┐
 │                                                                    │
 │  Frontend (Next.js)  ──▶  Go Gateway  ──▶  PyWorker-2 (gRPC)    │
@@ -38,6 +56,304 @@ A production-grade, hybrid (BM25 + kNN) enterprise search pipeline built on Open
 ```
 
 ---
+
+## Prerequisites
+
+> **Target platforms:** WSL 2 (Ubuntu 22.04 on Windows) · RHEL 10 x86\_64 · Fedora 43 x86\_64
+
+### Hardware Requirements
+
+| Resource | Docker Compose (min) | Minikube (min) | Recommended |
+|----------|---------------------|----------------|-------------|
+| CPU | 4 cores (x86\_64) | 4 cores (x86\_64) | 6+ cores |
+| RAM | 8 GB | 12 GB | 16 GB |
+| Disk | 25 GB free | 45 GB free | 60 GB free |
+
+---
+
+### WSL 2 (Windows 11 / Windows 10 22H2+)
+
+#### 1. Enable WSL 2 + Ubuntu
+
+```powershell
+# Run in PowerShell (Administrator)
+wsl --install -d Ubuntu-22.04
+wsl --set-default-version 2
+```
+
+Restart Windows, then open the **Ubuntu 22.04** app and create your UNIX user.
+
+#### 2. Docker Desktop (recommended for WSL)
+
+Download and install **Docker Desktop for Windows** from [docs.docker.com/desktop/windows](https://docs.docker.com/desktop/windows/install/).
+
+In Docker Desktop → **Settings → Resources → WSL Integration**, enable your Ubuntu distro.
+
+```bash
+# Verify inside WSL terminal
+docker --version          # Docker version 24.x or higher
+docker compose version    # Docker Compose version v2.20 or higher
+```
+
+> **Alternative (Docker Engine inside WSL, no Desktop):**
+> ```bash
+> sudo apt-get update
+> sudo apt-get install -y ca-certificates curl gnupg
+> sudo install -m 0755 -d /etc/apt/keyrings
+> curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+>   | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+> echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] \
+>   https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+>   | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+> sudo apt-get update
+> sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+> sudo usermod -aG docker $USER && newgrp docker
+> ```
+
+#### 3. OpenSearch kernel setting (WSL)
+
+WSL does not persist sysctl between reboots. Add to your shell profile **and** run manually each session:
+
+```bash
+# Apply now
+sudo sysctl -w vm.max_map_count=262144
+
+# Persist across WSL restarts — add to ~/.bashrc or ~/.zshrc
+echo 'sudo sysctl -w vm.max_map_count=262144 > /dev/null 2>&1' >> ~/.bashrc
+```
+
+> Alternatively, create `/etc/wsl.conf` on the Windows side to auto-apply on WSL start:
+> ```ini
+> # C:\Users\<you>\.wslconfig
+> [wsl2]
+> kernelCommandLine=sysctl.vm.max_map_count=262144
+> ```
+
+#### 4. Minikube on WSL 2
+
+```bash
+# Install minikube (x86_64)
+curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+sudo install minikube-linux-amd64 /usr/local/bin/minikube && rm minikube-linux-amd64
+
+# Install kubectl (x86_64)
+curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install kubectl /usr/local/bin/kubectl && rm kubectl
+
+# Verify
+minikube version    # v1.32.x or higher
+kubectl version --client
+
+# Minikube uses Docker as its driver inside WSL — no extra setup needed
+minikube config set driver docker
+```
+
+#### 5. Git & AWS CLI (WSL)
+
+```bash
+sudo apt-get install -y git awscli
+```
+
+---
+
+### RHEL 10 — x86\_64
+
+> RHEL 10 ships with **DNF5** (replacing DNF4) and uses `dnf5 config-manager` syntax. All commands below reflect that.
+
+#### 1. Docker Engine on RHEL 10
+
+> **Note:** Docker CE is not in the default RHEL repos. Add Docker's official RHEL repository.
+
+```bash
+# Add Docker CE repo (DNF5 syntax)
+sudo dnf5 config-manager addrepo \
+  --from-repofile=https://download.docker.com/linux/rhel/docker-ce.repo
+
+# Install Docker CE + Compose plugin
+sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+# Enable and start the Docker daemon
+sudo systemctl enable --now docker
+
+# Allow your user to run Docker without sudo
+sudo usermod -aG docker $USER && newgrp docker
+
+# Verify
+docker --version          # Docker version 26.x or higher
+docker compose version    # Docker Compose version v2.27 or higher
+```
+
+> **SELinux note (RHEL 10):** SELinux is enforcing by default. If containers fail to read bind-mounted paths:
+> ```bash
+> # Option A — label the host path (preferred for production)
+> chcon -Rt container_file_t /path/to/your/data
+>
+> # Option B — set permissive temporarily (testing only)
+> sudo setenforce 0
+> ```
+> RHEL 10 uses the `container_file_t` label (replaces `svirt_sandbox_file_t` from older releases).
+
+#### 2. OpenSearch kernel setting (RHEL 10)
+
+```bash
+# Apply immediately (no reboot needed)
+sudo sysctl -w vm.max_map_count=262144
+
+# Persist across reboots via sysctl.d drop-in
+echo "vm.max_map_count=262144" | sudo tee /etc/sysctl.d/99-opensearch.conf
+sudo sysctl --system
+
+# Confirm
+sysctl vm.max_map_count   # should print: vm.max_map_count = 262144
+```
+
+#### 3. Firewall (RHEL 10 — only needed for Minikube NodePorts)
+
+```bash
+# Open the NodePorts used by k8s/ manifests
+sudo firewall-cmd --add-port=30080/tcp --permanent   # Go Gateway
+sudo firewall-cmd --add-port=30300/tcp --permanent   # Frontend
+sudo firewall-cmd --add-port=30601/tcp --permanent   # OpenSearch Dashboards
+sudo firewall-cmd --add-port=30901/tcp --permanent   # MinIO Console
+sudo firewall-cmd --reload
+
+# Verify
+sudo firewall-cmd --list-ports
+```
+
+#### 4. Minikube on RHEL 10 x86\_64
+
+```bash
+# Install minikube
+curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+sudo install minikube-linux-amd64 /usr/local/bin/minikube && rm minikube-linux-amd64
+
+# Install kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install kubectl /usr/local/bin/kubectl && rm kubectl
+
+# Verify
+minikube version    # v1.34.x or higher
+kubectl version --client
+
+# Use Docker as the Minikube driver
+minikube config set driver docker
+```
+
+#### 5. Git & AWS CLI (RHEL 10)
+
+```bash
+sudo dnf install -y git unzip
+
+# AWS CLI v2 — install from the official bundle (not in DNF)
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+unzip awscliv2.zip && sudo ./aws/install
+rm -rf awscliv2.zip aws/
+aws --version
+```
+
+---
+
+### Fedora 43 — x86\_64
+
+> Fedora 43 ships with **DNF5** by default. The syntax differs slightly from older DNF4 commands.
+
+#### 1. Docker Engine on Fedora 43
+
+```bash
+# Add Docker CE repo for Fedora (DNF5 syntax)
+sudo dnf5 config-manager addrepo \
+  --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo
+
+# Install Docker CE + Compose plugin
+sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+# Enable and start Docker
+sudo systemctl enable --now docker
+
+# Allow non-root use
+sudo usermod -aG docker $USER && newgrp docker
+
+# Verify
+docker --version
+docker compose version
+```
+
+> **SELinux note (Fedora 43):** Fedora enforces SELinux. Apply the `container_file_t` label to any directories you bind-mount:
+> ```bash
+> chcon -Rt container_file_t /path/to/your/data
+> ```
+
+#### 2. OpenSearch kernel setting (Fedora 43)
+
+```bash
+# Apply immediately
+sudo sysctl -w vm.max_map_count=262144
+
+# Persist across reboots
+echo "vm.max_map_count=262144" | sudo tee /etc/sysctl.d/99-opensearch.conf
+sudo sysctl --system
+```
+
+#### 3. Firewall (Fedora 43 — only needed for Minikube NodePorts)
+
+```bash
+sudo firewall-cmd --add-port=30080/tcp --permanent   # Go Gateway
+sudo firewall-cmd --add-port=30300/tcp --permanent   # Frontend
+sudo firewall-cmd --add-port=30601/tcp --permanent   # OpenSearch Dashboards
+sudo firewall-cmd --add-port=30901/tcp --permanent   # MinIO Console
+sudo firewall-cmd --reload
+```
+
+#### 4. Minikube on Fedora 43 x86\_64
+
+```bash
+# Install minikube
+curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+sudo install minikube-linux-amd64 /usr/local/bin/minikube && rm minikube-linux-amd64
+
+# Install kubectl
+curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install kubectl /usr/local/bin/kubectl && rm kubectl
+
+# Verify
+minikube version
+kubectl version --client
+
+# Use Docker driver
+minikube config set driver docker
+```
+
+#### 5. Git & AWS CLI (Fedora 43)
+
+```bash
+sudo dnf install -y git unzip
+
+# AWS CLI v2
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+unzip awscliv2.zip && sudo ./aws/install
+rm -rf awscliv2.zip aws/
+aws --version
+```
+
+---
+
+### Quick prerequisite check (all platforms)
+
+Run this snippet inside your terminal to verify everything is in place before deploying:
+
+```bash
+echo "=== Prerequisite Check ===" && \
+  docker --version && \
+  docker compose version && \
+  (command -v minikube && minikube version || echo "minikube: not installed (only needed for k8s deploy)") && \
+  (command -v kubectl  && kubectl version --client 2>/dev/null || echo "kubectl: not installed") && \
+  echo "vm.max_map_count=$(sysctl -n vm.max_map_count) (need >= 262144)" && \
+  echo "=== All checks done ==="
+```
+
+---
+
 
 ## Repository Structure
 
@@ -61,7 +377,7 @@ HPE/
 │   │   ├── proto/                  # Generated gRPC stubs (Python)
 │   │   └── Dockerfile
 │   ├── frontend/                   # Next.js HPE-themed search UI
-│   ├── docker-compose.yml          # Search-side stack (OpenSearch + Redis + gateway + UI)
+│   ├── docker-compose.yml          # Search-side stack (standalone)
 │   └── .env.example
 │
 ├── workers/
@@ -75,8 +391,9 @@ HPE/
 │   └── model-server/               # FastAPI embedding server
 │       ├── server.py               # /embed/text  /embed/image  endpoints
 │       ├── text_embedder.py        # SentenceTransformer (384-dim)
-│       ├── image_embedder.py       # CLIP / torchvision image embedder
+│       ├── image_embedder.py       # nomic-embed-vision-v1.5 image embedder
 │       ├── main.py                 # Uvicorn entry
+│       ├── requirements.txt        # Model-server-specific Python deps
 │       └── load-balancer/nginx.conf
 │
 ├── backend/
@@ -84,40 +401,111 @@ HPE/
 │   └── search/opensearch_query_builder.py  # Hybrid BM25+kNN query reference
 │
 ├── infrastructure/
-│   ├── opensearch/index-mapping.json  # kNN-enabled index schema (obsidian-docs)
-│   ├── kafka/                         # Kafka KRaft cluster configs + topic scripts
-│   ├── minio/                         # MinIO bucket + event-notification setup
+│   ├── opensearch/index-mapping.json  # kNN-enabled index schema (hpe-search-docs)
+│   ├── kafka/                         # Kafka topic scripts
+│   ├── minio/                         # MinIO bucket + event-notification config
 │   └── startup.sh                     # One-shot bootstrap script
 │
-├── tests/
-│   └── test_opensearch.py          # OpenSearch integration tests
+├── k8s/                            # Kubernetes / Minikube manifests
+│   ├── 00-namespace.yaml
+│   ├── 01-configmap.yaml
+│   ├── 02-pvcs.yaml
+│   ├── infrastructure/             # Kafka, MinIO, Tika, OpenSearch, Redis
+│   ├── ingestion/                  # model-server, ingestion-worker
+│   ├── search/                     # pyworker, go-gateway, frontend
+│   └── deploy.sh                   # One-shot deploy script for Minikube
 │
-├── docker-compose.yml              # Unified full-stack compose — starts everything in one command
-├── requirements.txt                # Python dependencies for ML (model-server + pyworker)
+├── tests/
+│   └── test_opensearch.py          # OpenSearch + Redis integration tests
+│
+├── docker-compose.yml              # Unified full-stack compose (14 services)
+├── requirements.txt                # Python dependencies (ingestion + backend)
 ├── pytest.ini
 └── .env.example                    # All environment variables documented
 ```
 
 ---
 
-## Quick Start
+## Quick Start — Docker Compose
 
 ```bash
-# 1. Configure
-cp .env.example .env
-# Edit .env only if you need to change defaults (OpenSearch host, MinIO creds, etc.)
+# 1. Clone the repo
+git clone <repo-url> && cd HPE
 
-# 2. Start everything
+# 2. Apply kernel setting for OpenSearch (Linux only)
+sudo sysctl -w vm.max_map_count=262144
+
+# 3. Configure environment
+cp .env.example .env
+# Edit .env only if you need non-default values (host, credentials, etc.)
+
+# 4. Start all 14 services
 docker compose up --build -d
+
+# 5. Follow startup logs (wait ~2 min for all services to be healthy)
+docker compose logs -f opensearch ingestion-worker model-server
 ```
 
-That's it. All 14 services — Kafka, MinIO, Tika, OpenSearch, Redis, ingestion worker, model server, PyWorker-2, Go Gateway, and the frontend — start together with proper dependency ordering.
+Open **http://localhost:3000** once the stack is healthy.
 
-Open **http://localhost:3000** when the stack is up.
+---
+
+## Quick Start — Minikube
+
+The `k8s/deploy.sh` script handles everything — Minikube startup, image builds, manifest apply, and init job sequencing.
+
+```bash
+# 1. Clone the repo
+git clone <repo-url> && cd HPE
+
+# 2. Run the deploy script (takes ~5–10 min on first run — downloads models)
+chmod +x k8s/deploy.sh
+./k8s/deploy.sh
+
+# Full reset (wipes namespace and redeploys from scratch):
+./k8s/deploy.sh --reset
+```
+
+After deployment, the script prints access URLs:
+
+```
+Frontend:              http://<minikube-ip>:30300
+Go Gateway (API):      http://<minikube-ip>:30080
+MinIO Console:         http://<minikube-ip>:30901
+OpenSearch Dashboards: http://<minikube-ip>:30601
+```
+
+Get your Minikube IP with:
+```bash
+minikube ip
+```
+
+### Common Minikube commands
+
+```bash
+# Watch all pods
+kubectl get pods -n hpe-search -w
+
+# Tail a service's logs
+kubectl logs -n hpe-search deploy/model-server -f
+kubectl logs -n hpe-search deploy/ingestion-worker -f
+
+# Open a service in the browser
+minikube service frontend -n hpe-search
+minikube service go-gateway -n hpe-search
+
+# Stop Minikube (preserves data)
+minikube stop
+
+# Delete entire cluster
+minikube delete
+```
+
+---
 
 ## Service Ports
 
-All services run from the single root `docker-compose.yml`.
+### Docker Compose
 
 | Service | Port(s) | Description |
 |---------|---------|-------------|
@@ -135,6 +523,15 @@ All services run from the single root `docker-compose.yml`.
 | **Kafka broker 2** | `29093` | External Kafka listener |
 | **Kafka broker 3** | `29094` | External Kafka listener |
 
+### Minikube (NodePort)
+
+| Service | NodePort | Description |
+|---------|----------|-------------|
+| **Frontend** | `30300` | Next.js search UI |
+| **Go Gateway** | `30080` | REST API entry point |
+| **MinIO Console** | `30901` | MinIO web UI |
+| **OpenSearch Dashboards** | `30601` | Index inspection UI |
+
 ---
 
 ## Environment Variables
@@ -142,10 +539,10 @@ All services run from the single root `docker-compose.yml`.
 Copy `.env.example` → `.env` and adjust as needed.
 
 ```bash
-# OpenSearch — must match the index created by ingestion pipeline
+# OpenSearch — must match the index created by the ingestion pipeline
 OPENSEARCH_HOST=localhost
 OPENSEARCH_PORT=9200
-OPENSEARCH_INDEX=obsidian-docs
+OPENSEARCH_INDEX=hpe-search-docs
 
 # Search tuning
 SEARCH_KNN_K=50
@@ -177,14 +574,14 @@ MINIO_SECRET_KEY=minioadmin123
 
 ## OpenSearch Index
 
-The pipeline uses an index named **`obsidian-docs`** with kNN + BM25 hybrid mapping.
+The pipeline uses an index named **`hpe-search-docs`** with kNN + BM25 hybrid mapping.
 
-The index is created automatically on startup by the `opensearch-init` service in the ingestion `docker-compose.yml`. The mapping lives in `infrastructure/opensearch/index-mapping.json`.
+The index is created automatically on startup by the `opensearch-init` service. The mapping lives in `infrastructure/opensearch/index-mapping.json`.
 
 To create it manually:
 
 ```bash
-curl -X PUT http://localhost:9200/obsidian-docs \
+curl -X PUT http://localhost:9200/hpe-search-docs \
   -H 'Content-Type: application/json' \
   -d @infrastructure/opensearch/index-mapping.json
 ```
@@ -207,15 +604,18 @@ curl -X PUT http://localhost:9200/obsidian-docs \
       - File type, extension, and size filters
    b. SentenceTransformer embed query → 384-dim vector
    c. OpenSearch query:
-      - Keywords present → multi_match across filename, chunk_text, mime_type, etc.
+      - kNN semantic search using the embedded vector
+      - BM25 keyword search using multi_match
       - Filter-only query (no keywords) → match_all + filter clauses
+   d. Merge & Rank:
+      - Blend kNN and BM25 scores (configurable boosts)
+      - Deduplicate chunks (keep highest scoring chunk per file)
+      - Drop irrelevant matches (combined_score < 0.55 threshold)
 6. PyWorker-2 returns ranked proto results to Go Gateway
-7. Go Gateway merger: dedup by ID, sort by combined_score desc, trim to limit
+7. Go Gateway caches and returns the final results to the UI
 8. Go Gateway → Redis: store result with TTL    [X-Cache: MISS]
 9. Go Gateway → Frontend → render results
 ```
-
----
 
 ## How the Ingestion Pipeline Works
 
@@ -276,15 +676,7 @@ aws s3 cp /path/to/folder/ s3://uploads/ \
   --endpoint-url http://localhost:9000
 ```
 
-### 4. Upload with a subfolder prefix (recommended for organisation)
-
-```bash
-aws s3 cp /path/to/folder/ s3://uploads/my-project/ \
-  --recursive \
-  --endpoint-url http://localhost:9000
-```
-
-### 5. Useful commands
+### 4. Useful commands
 
 ```bash
 # List all files in the bucket
@@ -311,13 +703,13 @@ aws s3 sync /path/to/folder/ s3://uploads/ \
 curl -s http://localhost:9200/_cluster/health | python3 -m json.tool
 
 # Count indexed documents
-curl -s http://localhost:9200/obsidian-docs/_count | python3 -m json.tool
+curl -s http://localhost:9200/hpe-search-docs/_count | python3 -m json.tool
 
 # View latest 5 documents
-curl -s "http://localhost:9200/obsidian-docs/_search?pretty&size=5"
+curl -s "http://localhost:9200/hpe-search-docs/_search?pretty&size=5"
 
 # Search for a term
-curl -s "http://localhost:9200/obsidian-docs/_search?pretty" \
+curl -s "http://localhost:9200/hpe-search-docs/_search?pretty" \
   -H "Content-Type: application/json" \
   -d '{"query": {"match": {"chunk_text": "your search term"}}}'
 
@@ -329,52 +721,49 @@ curl -s http://localhost:9200/_cat/indices?v
 
 ```bash
 # List all cached search keys
-docker exec obsidian-redis redis-cli KEYS "search:*"
+docker exec hpe-search-redis redis-cli KEYS "hpe-search:search:result:*"
 
 # Count cached entries
-docker exec obsidian-redis redis-cli DBSIZE
-
-# View a cached result (replace <key> with one from KEYS above)
-docker exec obsidian-redis redis-cli GET <key>
-
-# Cache hit/miss stats
-docker exec obsidian-redis redis-cli INFO stats | grep -E "keyspace_hits|keyspace_misses|used_memory_human"
+docker exec hpe-search-redis redis-cli DBSIZE
 
 # Flush cache (force all misses — useful during testing)
-docker exec obsidian-redis redis-cli FLUSHDB
+docker exec hpe-search-redis redis-cli FLUSHDB
+
+# Cache stats
+docker exec hpe-search-redis redis-cli HGETALL hpe-search:cache:stats
 ```
 
 ### Container health & logs
 
 ```bash
-# Check all container statuses at a glance
+# Check all container statuses
 docker ps --format "table {{.Names}}\t{{.Status}}"
 
 # Tail logs for a specific service
-docker logs obsidian-ingestion-worker -f
-docker logs obsidian-tika -f
-docker logs obsidian-minio -f
-docker logs obsidian-opensearch -f
-docker logs obsidian-go-gateway -f
-docker logs obsidian-pyworker-2 -f
+docker logs hpe-search-ingestion-worker -f
+docker logs hpe-search-tika -f
+docker logs hpe-search-minio -f
+docker logs hpe-search-opensearch -f
+docker logs hpe-search-go-gateway -f
+docker logs hpe-search-pyworker-2 -f
 
-# Inspect health check detail for a container
-docker inspect obsidian-tika --format '{{json .State.Health}}' | python3 -m json.tool
+# Inspect health check detail
+docker inspect hpe-search-model-server --format '{{json .State.Health}}' | python3 -m json.tool
 ```
 
 ### Kafka
 
 ```bash
 # List topics
-docker exec obsidian-kafka-1 /opt/kafka/bin/kafka-topics.sh \
+docker exec hpe-search-kafka-1 /opt/kafka/bin/kafka-topics.sh \
   --bootstrap-server kafka1:9092 --list
 
 # Watch upload events in real-time
-docker exec obsidian-kafka-1 /opt/kafka/bin/kafka-console-consumer.sh \
+docker exec hpe-search-kafka-1 /opt/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server kafka1:9092 --topic file-upload-events --from-beginning
 
-# Check consumer lag (how far behind the ingestion worker is)
-docker exec obsidian-kafka-1 /opt/kafka/bin/kafka-consumer-groups.sh \
+# Check consumer lag
+docker exec hpe-search-kafka-1 /opt/kafka/bin/kafka-consumer-groups.sh \
   --bootstrap-server kafka1:9092 --describe --group ingestion-worker
 ```
 
@@ -392,11 +781,24 @@ http://localhost:9001
 
 ## Stopping
 
+### Docker Compose
+
 ```bash
+# Stop containers (preserves volumes)
 docker compose down
 
-# Also remove all volumes (OpenSearch data, MinIO data, Redis data)
+# Stop and remove all data volumes
 docker compose down -v
+```
+
+### Minikube
+
+```bash
+# Stop cluster (preserves data)
+minikube stop
+
+# Delete cluster and all data
+minikube delete
 ```
 
 ---
@@ -404,11 +806,14 @@ docker compose down -v
 ## Running Tests
 
 ```bash
-# Install dependencies
+# Install Python dependencies
 pip install -r requirements.txt
 
-# OpenSearch integration tests (requires OpenSearch running on localhost:9200)
-pytest tests/test_opensearch.py -v
+# Unit tests only (no running services needed)
+pytest tests/test_opensearch.py -v -m unit
+
+# Integration tests (requires OpenSearch + Redis running on localhost)
+pytest tests/test_opensearch.py -v -m integration
 
 # Full E2E pipeline test
 pytest workers/ingestion/test_e2e_full_pipeline.py -v

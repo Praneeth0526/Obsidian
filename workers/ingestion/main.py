@@ -115,7 +115,7 @@ class IngestionWorker:
                 if is_image:
                     logger.info(f"Handling as image: {key}")
                     image_result = await asyncio.to_thread(self.image_handler.process, file_bytes, content_type)
-                    vector       = await self.model_client.embed_image(image_result.processed_bytes, "image/jpeg")
+                    vector       = await self.model_client.embed_image(image_result.image_bytes, "image/jpeg")
 
                     doc = ChunkDocument(
                         object_key   = object_key,

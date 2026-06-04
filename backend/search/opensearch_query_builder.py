@@ -25,11 +25,11 @@ from opensearchpy import OpenSearch, RequestsHttpConnection
 
 load_dotenv()
 
-log = logging.getLogger("obsidian.search")
+log = logging.getLogger("hpe_search.search")
 
 OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
 OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
-INDEX_NAME      = os.getenv("OPENSEARCH_INDEX", "obsidian-files")
+INDEX_NAME      = os.getenv("OPENSEARCH_INDEX", "hpe-search-docs")
 KNN_K           = int(os.getenv("SEARCH_KNN_K", "50"))        # candidates from kNN
 BM25_BOOST      = float(os.getenv("SEARCH_BM25_BOOST", "0.4"))
 KNN_BOOST       = float(os.getenv("SEARCH_KNN_BOOST", "0.6"))

@@ -43,7 +43,7 @@ services:
       GRPC_SEARCH_PORT: 50052
       OPENSEARCH_HOST: opensearch
       OPENSEARCH_PORT: 9200
-      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-obsidian-docs}
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-hpe-search-docs}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
@@ -93,7 +93,7 @@ services:
       NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8080}
       OPENSEARCH_HOST: opensearch
       OPENSEARCH_PORT: 9200
-      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-obsidian-docs}
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-hpe-search-docs}
     depends_on:
       - go-gateway
     restart: unless-stopped

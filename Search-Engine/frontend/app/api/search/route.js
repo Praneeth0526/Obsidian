@@ -1,60 +1,33 @@
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const query = (searchParams.get("q") || "").trim();
+  const limit = searchParams.get("limit") || "8";
 
   if (!query) {
     return Response.json({ results: [] }, { status: 200 });
   }
 
-  // Default to localhost for local dev; docker-compose sets OPENSEARCH_HOST=opensearch.
-  const host = process.env.OPENSEARCH_HOST || "localhost";
-  const port = process.env.OPENSEARCH_PORT || "9200";
-  const index = process.env.OPENSEARCH_INDEX || "object-storage-index";
-
-  const { queryText, filterClauses } = parseNaturalQuery(query);
-  const body = {
-    size: 25,
-    query: {
-      bool: {
-        must: queryText
-          ? [
-              {
-                multi_match: {
-                  query: queryText,
-                  fields: ["object_name^3", "extension^2", "bucket", "content_type"],
-                },
-              },
-            ]
-          : [{ match_all: {} }],
-        filter: filterClauses,
-      },
-    },
-  };
+  const gatewayUrl = process.env.GATEWAY_URL || "http://localhost:8080";
 
   try {
-    const response = await fetch(`http://${host}:${port}/${index}/_search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+    const response = await fetch(`${gatewayUrl}/search?q=${encodeURIComponent(query)}&limit=${limit}`, {
+      method: "GET",
       cache: "no-store",
     });
 
     if (!response.ok) {
       return Response.json(
-        { results: [], error: "OpenSearch query failed" },
-        { status: 502 },
+        { results: [], error: "Gateway query failed" },
+        { status: 502 }
       );
     }
 
     const data = await response.json();
-    const hits = data?.hits?.hits || [];
-    const results = hits.map((hit) => hit._source || {});
-
-    return Response.json({ results }, { status: 200 });
+    return Response.json(data, { status: 200 });
   } catch (error) {
     return Response.json(
       { results: [], error: error?.message || "Search failed" },
-      { status: 500 },
+      { status: 500 }
     );
   }
 }

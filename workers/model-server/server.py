@@ -75,7 +75,7 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="Obsidian Model Server",
+    title="HPE Search Model Server",
     description=(
         "Centralised embedding service. "
         "Exposes /embed/text and /embed/image backed by "

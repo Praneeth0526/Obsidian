@@ -9,7 +9,7 @@ services:
   # ---------------------------------------------------------------------------
   kafka1:
     image: apache/kafka:3.8.1
-    container_name: obsidian-kafka-1
+    container_name: hpe-search-kafka-1
     hostname: kafka1
     ports:
       - "29092:29092"
@@ -28,7 +28,7 @@ services:
       KAFKA_DEFAULT_REPLICATION_FACTOR: 3
       KAFKA_MIN_INSYNC_REPLICAS: 2
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-      CLUSTER_ID: "obsidian-local-cluster-1"
+      CLUSTER_ID: "hpe-search-local-cluster-1"
     healthcheck:
       test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
       interval: 15s
@@ -42,7 +42,7 @@ services:
   # ---------------------------------------------------------------------------
   kafka2:
     image: apache/kafka:3.8.1
-    container_name: obsidian-kafka-2
+    container_name: hpe-search-kafka-2
     hostname: kafka2
     ports:
       - "29093:29093"
@@ -61,7 +61,7 @@ services:
       KAFKA_DEFAULT_REPLICATION_FACTOR: 3
       KAFKA_MIN_INSYNC_REPLICAS: 2
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-      CLUSTER_ID: "obsidian-local-cluster-1"
+      CLUSTER_ID: "hpe-search-local-cluster-1"
     healthcheck:
       test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
       interval: 15s
@@ -75,7 +75,7 @@ services:
   # ---------------------------------------------------------------------------
   kafka3:
     image: apache/kafka:3.8.1
-    container_name: obsidian-kafka-3
+    container_name: hpe-search-kafka-3
     hostname: kafka3
     ports:
       - "29094:29094"
@@ -94,7 +94,7 @@ services:
       KAFKA_DEFAULT_REPLICATION_FACTOR: 3
       KAFKA_MIN_INSYNC_REPLICAS: 2
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-      CLUSTER_ID: "obsidian-local-cluster-1"
+      CLUSTER_ID: "hpe-search-local-cluster-1"
     healthcheck:
       test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
       interval: 15s
@@ -108,7 +108,7 @@ services:
   # ---------------------------------------------------------------------------
   kafka-init:
     image: apache/kafka:3.8.1
-    container_name: obsidian-kafka-init
+    container_name: hpe-search-kafka-init
     depends_on:
       kafka1:
         condition: service_healthy
@@ -146,14 +146,14 @@ services:
   # ---------------------------------------------------------------------------
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
-    container_name: obsidian-minio
+    container_name: hpe-search-minio
     ports:
       - "9000:9000"   # S3 API
       - "9001:9001"   # Web console
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin123
-      MINIO_SITE_NAME: obsidian-minio
+      MINIO_SITE_NAME: hpe-search-minio
       MINIO_NOTIFY_KAFKA_ENABLE_1: "on"
       MINIO_NOTIFY_KAFKA_BROKERS_1: "kafka1:9092,kafka2:9092,kafka3:9092"
       MINIO_NOTIFY_KAFKA_TOPIC_1: "file-upload-events"
@@ -180,7 +180,7 @@ services:
   # ---------------------------------------------------------------------------
   minio-init:
     image: minio/mc:latest
-    container_name: obsidian-minio-init
+    container_name: hpe-search-minio-init
     depends_on:
       minio:
         condition: service_healthy
@@ -210,7 +210,7 @@ services:
   # ---------------------------------------------------------------------------
   tika:
     image: apache/tika:latest
-    container_name: obsidian-tika
+    container_name: hpe-search-tika
     ports:
       - "9998:9998"
     environment:
@@ -233,7 +233,7 @@ services:
   # ---------------------------------------------------------------------------
   opensearch:
     image: opensearchproject/opensearch:2.19.1
-    container_name: obsidian-opensearch
+    container_name: hpe-search-opensearch
     ports:
       - "9200:9200"
       - "9600:9600"
@@ -255,11 +255,11 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # OpenSearch Init — creates the obsidian-docs index with kNN mapping
+  # OpenSearch Init — creates the hpe-search-docs index with kNN mapping
   # ---------------------------------------------------------------------------
   opensearch-init:
     image: curlimages/curl:latest
-    container_name: obsidian-opensearch-init
+    container_name: hpe-search-opensearch-init
     depends_on:
       opensearch:
         condition: service_healthy
@@ -269,8 +269,8 @@ services:
     command:
       - |
         echo "=== OpenSearch Init ==="
-        echo "Creating obsidian-docs index..."
-        curl -sf -X PUT http://opensearch:9200/obsidian-docs \
+        echo "Creating hpe-search-docs index..."
+        curl -sf -X PUT http://opensearch:9200/hpe-search-docs \
           -H 'Content-Type: application/json' \
           -d @/mapping.json && echo "Index created!" || echo "Index may already exist, continuing..."
         echo "=== OpenSearch Init complete ==="
@@ -281,7 +281,7 @@ services:
   # ---------------------------------------------------------------------------
   opensearch-dashboards:
     image: opensearchproject/opensearch-dashboards:2.19.1
-    container_name: obsidian-opensearch-dashboards
+    container_name: hpe-search-opensearch-dashboards
     ports:
       - "5601:5601"
     environment:
@@ -297,7 +297,7 @@ services:
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7.2-alpine
-    container_name: obsidian-redis
+    container_name: hpe-search-redis
     ports:
       - "6379:6379"
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --loglevel notice
@@ -323,7 +323,7 @@ services:
       context: .
       dockerfile: workers/model-server/Dockerfile
     image: hpe-model-server:latest
-    container_name: obsidian-model-server
+    container_name: hpe-search-model-server
     ports:
       - "8000:8000"
     environment:
@@ -349,7 +349,7 @@ services:
       context: .
       dockerfile: workers/ingestion/Dockerfile
     image: hpe-ingestion-worker:latest
-    container_name: obsidian-ingestion-worker
+    container_name: hpe-search-ingestion-worker
     environment:
       # Kafka
       KAFKA_BOOTSTRAP_SERVERS: kafka1:9092,kafka2:9092,kafka3:9092
@@ -368,7 +368,7 @@ services:
       # OpenSearch
       OPENSEARCH_HOST: opensearch
       OPENSEARCH_PORT: 9200
-      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-obsidian-docs}
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-hpe-search-docs}
       OPENSEARCH_BULK_CHUNK_SIZE: ${OPENSEARCH_BULK_CHUNK_SIZE:-200}
       OPENSEARCH_MAX_RETRIES: ${OPENSEARCH_MAX_RETRIES:-5}
       OPENSEARCH_RETRY_BASE_DELAY: ${OPENSEARCH_RETRY_BASE_DELAY:-1.0}
@@ -404,13 +404,13 @@ services:
       context: ./Search-Engine
       dockerfile: pyworker/Dockerfile
     image: hpe-pyworker-2:latest
-    container_name: obsidian-pyworker-2
+    container_name: hpe-search-pyworker-2
     environment:
       GRPC_HOST: 0.0.0.0
       GRPC_SEARCH_PORT: 50052
       OPENSEARCH_HOST: opensearch
       OPENSEARCH_PORT: 9200
-      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-obsidian-docs}
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-hpe-search-docs}
       SEARCH_KNN_K: ${SEARCH_KNN_K:-50}
       SEARCH_BM25_BOOST: ${SEARCH_BM25_BOOST:-0.4}
       SEARCH_KNN_BOOST: ${SEARCH_KNN_BOOST:-0.6}
@@ -437,7 +437,7 @@ services:
       context: ./Search-Engine
       dockerfile: gateway/Dockerfile
     image: hpe-go-gateway:latest
-    container_name: obsidian-go-gateway
+    container_name: hpe-search-go-gateway
     ports:
       - "8080:8080"
     environment:
@@ -467,14 +467,14 @@ services:
       context: ./Search-Engine
       dockerfile: frontend/Dockerfile
     image: hpe-frontend:latest
-    container_name: obsidian-frontend
+    container_name: hpe-search-frontend
     ports:
       - "3000:3000"
     environment:
       NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8080}
       OPENSEARCH_HOST: opensearch
       OPENSEARCH_PORT: 9200
-      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-obsidian-docs}
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-hpe-search-docs}
     depends_on:
       - go-gateway
     restart: unless-stopped
@@ -484,10 +484,10 @@ services:
 # =============================================================================
 volumes:
   minio-data:
-    name: obsidian-minio-data
+    name: hpe-search-minio-data
   opensearch-data:
-    name: obsidian-opensearch-data
+    name: hpe-search-opensearch-data
   redis-data:
-    name: obsidian-redis-data
+    name: hpe-search-redis-data
   hf-cache:
-    name: obsidian-hf-cache
+    name: hpe-search-hf-cache

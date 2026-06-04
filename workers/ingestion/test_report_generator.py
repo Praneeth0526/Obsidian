@@ -209,7 +209,7 @@ class ReportGenerator:
                 "kafka": "apache/kafka:3.8.1",
                 "minio": "minio/minio:RELEASE.2025-04-22",
                 "tika": "apache/tika:latest",
-                "model_server": "Obsidian Model Server 1.0.0",
+                "model_server": "HPE Search Model Server 1.0.0",
                 "text_model": "sentence-transformers/all-MiniLM-L6-v2",
                 "image_model": "nomic-ai/nomic-embed-vision-v1.5",
                 "expected_embedding_dims": EXPECTED_EMBEDDING_DIMS,

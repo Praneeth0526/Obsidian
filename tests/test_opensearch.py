@@ -21,7 +21,7 @@ import pytest
 # ── Allow running without a live cluster (unit tests only) ────────────────────
 OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
 OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
-TEST_INDEX      = f"obsidian-test-{uuid.uuid4().hex[:8]}"
+TEST_INDEX      = f"hpe-search-test-{uuid.uuid4().hex[:8]}"
 
 os.environ["OPENSEARCH_INDEX"] = TEST_INDEX
 

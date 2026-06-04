@@ -11,7 +11,7 @@ EMBEDDING_DIMENSION = 384  # all-MiniLM-L6-v2 outputs 384-dim vectors
 
 OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
 OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
-OPENSEARCH_INDEX = os.getenv("OPENSEARCH_INDEX", "obsidian-docs")
+OPENSEARCH_INDEX = os.getenv("OPENSEARCH_INDEX", "hpe-search-docs")
 DEFAULT_LIMIT = int(os.getenv("DEFAULT_LIMIT", "10"))
 
 # Cache Configuration

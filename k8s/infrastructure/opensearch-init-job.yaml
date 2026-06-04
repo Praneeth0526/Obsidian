@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: opensearch-init
+  namespace: hpe-search
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-opensearch
+          image: curlimages/curl:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              until curl -sf http://opensearch:9200/_cluster/health; do
+                echo "Waiting for OpenSearch..."; sleep 10
+              done
+      containers:
+        - name: opensearch-init
+          image: curlimages/curl:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "=== OpenSearch Init ==="
+              curl -sf -X PUT http://opensearch:9200/hpe-search-docs \
+                -H 'Content-Type: application/json' \
+                -d @/mapping.json \
+                && echo "Index created!" \
+                || echo "Index may already exist, continuing..."
+              echo "=== OpenSearch Init complete ==="
+          volumeMounts:
+            - name: mapping
+              mountPath: /mapping.json
+              subPath: mapping.json
+      volumes:
+        - name: mapping
+          configMap:
+            name: opensearch-index-mapping
+---
+# The index mapping is stored as a ConfigMap so the Job can read it.
+# Apply the mapping JSON via: kubectl create configmap opensearch-index-mapping
+#   --from-file=mapping.json=infrastructure/opensearch/index-mapping.json -n hpe-search
+# (The deploy.sh does this automatically.)

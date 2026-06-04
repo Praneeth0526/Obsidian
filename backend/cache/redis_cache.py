@@ -1,7 +1,7 @@
 """
 backend/cache/redis_cache.py
 =============================
-Industry-grade Redis cache for Obsidian search results.
+Industry-grade Redis cache for HPE Search search results.
 
 Architecture role (from diagram)
 ---------------------------------
@@ -59,7 +59,7 @@ def _get_logger(name: str) -> logging.Logger:
     logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
     return logger
 
-log = _get_logger("obsidian.redis_cache")
+log = _get_logger("hpe_search.redis_cache")
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -78,9 +78,9 @@ TTL_POPULAR        = int(os.getenv("REDIS_TTL_POPULAR",  "1800"))   # 30 min —
 POPULAR_THRESHOLD  = int(os.getenv("REDIS_POPULAR_THRESHOLD", "10"))
 
 # Key prefixes
-PREFIX_RESULT      = "obsidian:search:result:"
-PREFIX_HITCOUNT    = "obsidian:search:hits:"
-PREFIX_STATS       = "obsidian:cache:stats"
+PREFIX_RESULT      = "hpe-search:search:result:"
+PREFIX_HITCOUNT    = "hpe-search:search:hits:"
+PREFIX_STATS       = "hpe-search:cache:stats"
 
 
 # ── Query hasher ──────────────────────────────────────────────────────────────
@@ -245,7 +245,7 @@ class RedisCache:
 
     def invalidate_all(self) -> int:
         """
-        Flush all Obsidian search cache keys.
+        Flush all HPE Search cache keys.
         Used after bulk re-ingestion when results would be stale.
         Returns number of keys deleted.
         """
