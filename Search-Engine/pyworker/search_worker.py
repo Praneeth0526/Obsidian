@@ -145,13 +145,26 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
             except Exception as exc:
                 print(f"[!] kNN search failed: {exc}")
 
-        # ── BM25 keyword search ──────────────────────────────────────────────
+        # ── BM25 keyword search (collapsed per file) ─────────────────────────
+        # We collapse on filename.keyword so each unique file appears once,
+        # regardless of how many chunks it has — a single large PDF won't
+        # flood the results and push smaller files off the list.
         bm25_hits: Dict[str, Dict] = {}
         if query_text:
-            must_clause = [{"multi_match": {"query": query_text, "fields": ["filename^3", "object_key^2", "chunk_text", "extension", "bucket", "mime_type"]}}]
+            must_clause = [{
+                "multi_match": {
+                    "query": query_text,
+                    "fields": ["filename^3", "object_key^2", "chunk_text",
+                               "extension", "bucket", "mime_type"],
+                }
+            }]
         else:
             must_clause = [{"match_all": {}}]
-        bm25_body = {"size": limit * 3, "query": {"bool": {"must": must_clause, "filter": filter_clauses}}}
+        bm25_body = {
+            "size": max(limit * 2, 50),
+            "query": {"bool": {"must": must_clause, "filter": filter_clauses}},
+            "collapse": {"field": "filename.keyword"},  # one hit per unique file
+        }
         try:
             resp = self.opensearch.search(index=OPENSEARCH_INDEX, body=bm25_body)
             for hit in resp.get("hits", {}).get("hits", []):
@@ -202,8 +215,9 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
                 "highlights":   {},
             })
 
-        # ── Deduplicate: keep one result per file (best chunk wins) ──────────
-        merged.sort(key=lambda x: x["combined_score"], reverse=True)
+        # Sort by combined score DESC, then by filename ASC as a stable tiebreaker
+        # so equal-scored files (e.g. pure filter queries returning 0.4 each) all surface.
+        merged.sort(key=lambda x: (-x["combined_score"], x.get("object_name", "")))
 
         # When query has intent text, filter out irrelevant matches below threshold.
         # When filter-only (no intent), show all matching docs.
@@ -213,7 +227,8 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
         seen_files: set = set()
         deduplicated: List[Dict] = []
         for item in merged:
-            file_key = item.get("object_key", item["id"])
+            # Use filename as the dedup key so each unique file appears once
+            file_key = item.get("object_name") or item.get("object_key", item["id"])
             if file_key not in seen_files:
                 seen_files.add(file_key)
                 deduplicated.append(item)
@@ -341,17 +356,35 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
         parts = filter_str.split(":", 1)[1].split("_")
         if len(parts) != 3: return {}
         month_str, day_str, year_str = parts
-        
-        month_map = {"jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3, "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7, "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12}
+
+        month_map = {
+            "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+            "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+            "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10,
+            "nov": 11, "november": 11, "dec": 12, "december": 12,
+        }
         month = month_map.get(month_str.lower(), 1)
-        day = int(day_str)
-        year = int(year_str)
-        
-        from datetime import datetime, timedelta
         try:
-            start = datetime(year, month, day)
-            end = start + timedelta(days=1)
-            return {"range": {"uploaded_at": {"gte": start.isoformat() + "Z", "lt": end.isoformat() + "Z"}}}
+            day  = int(day_str)
+            year = int(year_str)
+        except ValueError:
+            return {}
+
+        # Use timezone-aware UTC datetimes so the range matches the +00:00
+        # timestamps stored by the ingestion worker.
+        from datetime import datetime, timedelta, timezone
+        try:
+            start = datetime(year, month, day, tzinfo=timezone.utc)
+            end   = start + timedelta(days=1)
+            # OpenSearch expects RFC-3339 with offset, e.g. "2026-06-04T00:00:00+00:00"
+            return {
+                "range": {
+                    "uploaded_at": {
+                        "gte": start.isoformat(),
+                        "lt":  end.isoformat(),
+                    }
+                }
+            }
         except ValueError:
             return {}
 

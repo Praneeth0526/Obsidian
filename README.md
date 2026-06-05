@@ -214,6 +214,7 @@ sysctl vm.max_map_count   # should print: vm.max_map_count = 262144
 sudo firewall-cmd --add-port=30080/tcp --permanent   # Go Gateway
 sudo firewall-cmd --add-port=30300/tcp --permanent   # Frontend
 sudo firewall-cmd --add-port=30601/tcp --permanent   # OpenSearch Dashboards
+sudo firewall-cmd --add-port=30900/tcp --permanent   # MinIO S3 API
 sudo firewall-cmd --add-port=30901/tcp --permanent   # MinIO Console
 sudo firewall-cmd --reload
 
@@ -301,6 +302,7 @@ sudo sysctl --system
 sudo firewall-cmd --add-port=30080/tcp --permanent   # Go Gateway
 sudo firewall-cmd --add-port=30300/tcp --permanent   # Frontend
 sudo firewall-cmd --add-port=30601/tcp --permanent   # OpenSearch Dashboards
+sudo firewall-cmd --add-port=30900/tcp --permanent   # MinIO S3 API
 sudo firewall-cmd --add-port=30901/tcp --permanent   # MinIO Console
 sudo firewall-cmd --reload
 ```
@@ -525,10 +527,13 @@ minikube delete
 
 ### Minikube (NodePort)
 
+All services are reachable at `http://$(minikube ip):<NodePort>` — no port-forwarding needed.
+
 | Service | NodePort | Description |
 |---------|----------|-------------|
 | **Frontend** | `30300` | Next.js search UI |
-| **Go Gateway** | `30080` | REST API entry point |
+| **Go Gateway** | `30080` | REST API (`GET /search`, `GET /health`) |
+| **MinIO S3 API** | `30900` | S3-compatible upload endpoint |
 | **MinIO Console** | `30901` | MinIO web UI |
 | **OpenSearch Dashboards** | `30601` | Index inspection UI |
 
@@ -647,11 +652,11 @@ curl -X PUT http://localhost:9200/hpe-search-docs \
 
 ---
 
-## Uploading Files with AWS CLI
+## Uploading Files
 
-MinIO exposes an S3-compatible API on `http://localhost:9000`. Point the AWS CLI at it using `--endpoint-url`.
+### Docker Compose
 
-### 1. One-time configuration
+MinIO is exposed on `localhost:9000`. Configure AWS CLI once:
 
 ```bash
 aws configure set aws_access_key_id     minioadmin
@@ -659,122 +664,113 @@ aws configure set aws_secret_access_key minioadmin123
 aws configure set default.region        us-east-1
 ```
 
-> The region value is ignored by MinIO but required by the AWS CLI — any string works.
-
-### 2. Upload a single file
-
 ```bash
-aws s3 cp /path/to/your/file.pdf s3://uploads/file.pdf \
-  --endpoint-url http://localhost:9000
-```
+# Upload a file
+aws s3 cp ./file.pdf s3://uploads/file.pdf --endpoint-url http://localhost:9000
 
-### 3. Upload an entire folder
+# Upload a folder
+aws s3 cp ./folder/ s3://uploads/ --recursive --endpoint-url http://localhost:9000
 
-```bash
-aws s3 cp /path/to/folder/ s3://uploads/ \
-  --recursive \
-  --endpoint-url http://localhost:9000
-```
-
-### 4. Useful commands
-
-```bash
-# List all files in the bucket
+# List bucket contents
 aws s3 ls s3://uploads/ --endpoint-url http://localhost:9000 --recursive
-
-# Delete a file
-aws s3 rm s3://uploads/file.pdf --endpoint-url http://localhost:9000
-
-# Sync a local folder (only uploads changed/new files)
-aws s3 sync /path/to/folder/ s3://uploads/ \
-  --endpoint-url http://localhost:9000
 ```
 
-> **How it triggers ingestion:** Every `s3 cp` / `s3 sync` PUT fires a MinIO event → Kafka `file-upload-events` topic → Ingestion Worker downloads the file, extracts text (Tika), chunks it, embeds it (Model Server), and indexes it into OpenSearch. The file becomes searchable within seconds.
+### Minikube
+
+MinIO's S3 API is exposed on **NodePort 30900** — no port-forwarding needed. Use the provided script:
+
+```bash
+# Upload a single file (bucket defaults to "uploads")
+./infrastructure/upload.sh ./yourfile.pdf
+
+# Upload an entire folder
+./infrastructure/upload.sh ./your-folder/
+
+# Upload to a specific bucket
+./infrastructure/upload.sh ./yourfile.pdf my-bucket
+```
+
+Or call AWS CLI directly:
+
+```bash
+MINIO_URL="http://$(minikube ip):30900"
+
+# Upload a file
+aws s3 cp ./file.pdf s3://uploads/file.pdf --endpoint-url $MINIO_URL
+
+# Upload a folder
+aws s3 cp ./folder/ s3://uploads/ --recursive --endpoint-url $MINIO_URL
+
+# List bucket contents
+aws s3 ls s3://uploads/ --endpoint-url $MINIO_URL --recursive
+```
+
+> **How it triggers ingestion:** Every upload PUT fires a MinIO event → Kafka `file-upload-events` → Ingestion Worker → Tika extract → chunk → embed → OpenSearch. Files become searchable within seconds.
 
 ---
 
 ## Debugging
 
-### OpenSearch
+### Docker Compose
 
 ```bash
-# Check cluster health
+# OpenSearch health
 curl -s http://localhost:9200/_cluster/health | python3 -m json.tool
-
-# Count indexed documents
 curl -s http://localhost:9200/hpe-search-docs/_count | python3 -m json.tool
 
-# View latest 5 documents
-curl -s "http://localhost:9200/hpe-search-docs/_search?pretty&size=5"
-
-# Search for a term
-curl -s "http://localhost:9200/hpe-search-docs/_search?pretty" \
-  -H "Content-Type: application/json" \
-  -d '{"query": {"match": {"chunk_text": "your search term"}}}'
-
-# List all indices
-curl -s http://localhost:9200/_cat/indices?v
-```
-
-### Redis
-
-```bash
-# List all cached search keys
-docker exec hpe-search-redis redis-cli KEYS "hpe-search:search:result:*"
-
-# Count cached entries
+# Redis cache
+docker exec hpe-search-redis redis-cli FLUSHDB   # flush stale cache
 docker exec hpe-search-redis redis-cli DBSIZE
 
-# Flush cache (force all misses — useful during testing)
-docker exec hpe-search-redis redis-cli FLUSHDB
-
-# Cache stats
-docker exec hpe-search-redis redis-cli HGETALL hpe-search:cache:stats
-```
-
-### Container health & logs
-
-```bash
-# Check all container statuses
-docker ps --format "table {{.Names}}\t{{.Status}}"
-
-# Tail logs for a specific service
+# Service logs
 docker logs hpe-search-ingestion-worker -f
-docker logs hpe-search-tika -f
-docker logs hpe-search-minio -f
-docker logs hpe-search-opensearch -f
 docker logs hpe-search-go-gateway -f
 docker logs hpe-search-pyworker-2 -f
 
-# Inspect health check detail
-docker inspect hpe-search-model-server --format '{{json .State.Health}}' | python3 -m json.tool
-```
-
-### Kafka
-
-```bash
-# List topics
+# Kafka topics
 docker exec hpe-search-kafka-1 /opt/kafka/bin/kafka-topics.sh \
   --bootstrap-server kafka1:9092 --list
 
-# Watch upload events in real-time
-docker exec hpe-search-kafka-1 /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server kafka1:9092 --topic file-upload-events --from-beginning
-
-# Check consumer lag
-docker exec hpe-search-kafka-1 /opt/kafka/bin/kafka-consumer-groups.sh \
-  --bootstrap-server kafka1:9092 --describe --group ingestion-worker
+# MinIO — list files
+aws s3 ls s3://uploads/ --endpoint-url http://localhost:9000 --recursive
+# Web console: http://localhost:9001  (minioadmin / minioadmin123)
 ```
 
-### MinIO
+### Minikube
 
 ```bash
-# List all uploaded files
-aws s3 ls s3://uploads/ --endpoint-url http://localhost:9000 --recursive
+MINIO_URL="http://$(minikube ip):30900"
 
-# Web console — login: minioadmin / minioadmin123
-http://localhost:9001
+# Pod status
+kubectl get pods -n hpe-search
+
+# OpenSearch health (via NodePort)
+curl -s "http://$(minikube ip):30601"   # OpenSearch Dashboards UI
+# or port-forward for raw API access:
+kubectl port-forward svc/opensearch 9200:9200 -n hpe-search &
+curl -s http://localhost:9200/hpe-search-docs/_count | python3 -m json.tool
+kill %1
+
+# Redis cache — flush stale results after a deploy
+kubectl exec deploy/redis -n hpe-search -- redis-cli FLUSHALL
+
+# Service logs
+kubectl logs -n hpe-search deploy/ingestion-worker -f
+kubectl logs -n hpe-search deploy/go-gateway -f
+kubectl logs -n hpe-search deploy/pyworker -f
+kubectl logs -n hpe-search deploy/model-server -f
+
+# Kafka topics
+kubectl exec kafka-0 -n hpe-search -- /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 --list
+
+# Watch Kafka upload events in real-time
+kubectl exec kafka-0 -n hpe-search -- /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic file-upload-events --from-beginning
+
+# MinIO — list files (direct NodePort, no port-forward)
+aws s3 ls s3://uploads/ --endpoint-url $MINIO_URL --recursive
+# Web console: http://$(minikube ip):30901  (minioadmin / minioadmin123)
 ```
 
 ---

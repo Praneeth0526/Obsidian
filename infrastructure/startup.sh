@@ -1,29 +1,39 @@
 #!/bin/bash
-# Role 1 - Startup Script
-# Run this every time you restart WSL to bring everything back up
+# Startup Script — brings up Minikube and all port-forwards automatically
+# Run this every time you start a new session
 
 set -e
 
-echo "=== Starting Role 1 Infrastructure ==="
+NAMESPACE="hpe-search"
+
+echo "=== Starting HPE Search Infrastructure ==="
 
 # Start minikube
 echo "Starting minikube..."
 minikube start --driver=docker
 
-# Wait for pods to be ready
-echo "Waiting for pods to be ready..."
-kubectl wait --for=condition=ready pod -l app=minio --timeout=120s
-kubectl wait --for=condition=ready pod -l strimzi.io/cluster=my-cluster -n kafka --timeout=120s
+# Wait for core pods to be ready
+echo "Waiting for MinIO to be ready..."
+kubectl wait --for=condition=ready pod -l app=minio -n "$NAMESPACE" --timeout=120s
 
-# Start MinIO port-forwards
-echo "Starting MinIO port-forwards..."
-kubectl port-forward svc/minio 9000:9000 &
-kubectl port-forward pod/$(kubectl get pod -l release=minio -o jsonpath="{.items[0].metadata.name}") 9001:9001 &
+echo "Starting port-forwards in background..."
+
+# MinIO S3 API
+kubectl port-forward svc/minio 9000:9000 -n "$NAMESPACE" &
+MINIO_S3_PID=$!
+
+# MinIO Console
+kubectl port-forward svc/minio-console 9001:9001 -n "$NAMESPACE" &
+MINIO_UI_PID=$!
+
+# Save PIDs so they can be killed later
+echo "$MINIO_S3_PID $MINIO_UI_PID" > /tmp/hpe-port-forward.pids
 
 echo ""
 echo "=== Infrastructure Ready! ==="
-echo "MinIO S3 API  : http://localhost:9000"
-echo "MinIO Console : http://localhost:9001"
-echo "Kafka Bootstrap: my-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092"
+echo "MinIO S3 API   : http://localhost:9000"
+echo "MinIO Console  : http://localhost:9001"
 echo ""
-echo "Credentials: minioadmin / minioadmin123"
+echo "Credentials    : minioadmin / minioadmin123"
+echo ""
+echo "To stop port-forwards later, run: kill \$(cat /tmp/hpe-port-forward.pids)"
