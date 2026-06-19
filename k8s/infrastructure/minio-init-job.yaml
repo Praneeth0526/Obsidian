@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-init
+  namespace: hpe-search
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-minio
+          image: curlimages/curl:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              until curl -sf http://minio:9000/minio/health/live; do
+                echo "Waiting for MinIO..."; sleep 5
+              done
+      containers:
+        - name: minio-init
+          image: minio/mc:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "=== MinIO Init ==="
+              mc alias set local http://minio:9000 minioadmin minioadmin123
+
+              echo "Creating uploads bucket..."
+              mc mb local/uploads --ignore-existing
+
+              echo "Adding Kafka notification event..."
+              mc event add local/uploads arn:minio:sqs::1:kafka --event put || \
+                echo "Event rule already exists, continuing..."
+
+              echo "Verifying events..."
+              mc event list local/uploads
+              echo "=== MinIO Init complete ==="

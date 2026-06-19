@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package search;
+
+service SearchWorker {
+    // ProcessQuery handles cache miss - parses query, vectorizes, and performs hybrid search
+    rpc ProcessQuery(SearchQueryRequest) returns (SearchQueryResponse);
+}
+
+message SearchQueryRequest {
+    string query = 1;
+    int32 limit = 2;  // Max results to return
+    map<string, string> metadata = 3;  // Optional context (user_id, session_id, etc.)
+}
+
+message SearchResult {
+    string id = 1;
+    string object_name = 2;
+    string bucket = 3;
+    int64 size_bytes = 4;
+    string content_type = 5;
+    string extension = 6;
+    string last_modified = 7;
+    float semantic_score = 8;    // Score from vector search
+    float keyword_score = 9;     // Score from keyword search
+    float combined_score = 10;   // Final ranking score
+    map<string, string> highlights = 11;  // Matching snippets
+}
+
+message SearchQueryResponse {
+    repeated SearchResult results = 1;
+    int32 total_hits = 2;
+    string intent_text = 3;            // Parsed intent for debugging
+    repeated string extracted_keywords = 4;  // Keywords extracted from intent
+    repeated string applied_filters = 5;  // Filters that were applied
+}

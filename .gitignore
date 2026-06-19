@@ -1,0 +1,26 @@
+# Environments
+.env
+.venv
+.venv/
+venv/
+ENV/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# IDEs
+.vscode/
+.idea/
+
+# Graphify and Agents
+.agents/
+graphify-out/
+
+# Ingestion outputs
+output_dims/
+models/

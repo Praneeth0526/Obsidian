@@ -1,0 +1,20 @@
+{
+  "text_model": {
+    "name": "sentence-transformers/all-MiniLM-L6-v2",
+    "dimension": 384,
+    "max_seq_length": 256,
+    "description": "Lightweight sentence-transformer optimised for semantic similarity. Used by the ingestion worker to embed text chunks and by the search worker to vectorise queries."
+  },
+  "image_model": {
+    "name": "nomic-ai/nomic-embed-vision-v1.5",
+    "dimension": 384,
+    "input_resolution": [224, 224],
+    "input_format": "JPEG",
+    "description": "CLIP-compatible vision model producing 384-dim vectors aligned with nomic-embed-text. Input must be a 224x224 RGB JPEG image (preprocessed by ImageHandler)."
+  },
+  "endpoints": {
+    "embed_text": "POST /embed/text",
+    "embed_image": "POST /embed/image",
+    "health": "GET /health"
+  }
+}

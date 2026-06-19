@@ -1,0 +1,55 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-init
+  namespace: hpe-search
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        # Wait until all 3 brokers are ready before creating topics
+        - name: wait-for-kafka
+          image: apache/kafka:3.8.1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "Waiting for all Kafka brokers..."
+              for broker in kafka-0 kafka-1 kafka-2; do
+                until /opt/kafka/bin/kafka-topics.sh \
+                  --bootstrap-server kafka-headless.hpe-search.svc.cluster.local:9092 \
+                  --list > /dev/null 2>&1; do
+                  echo "  Broker not ready, retrying in 5s..."
+                  sleep 5
+                done
+              done
+              echo "All brokers reachable."
+      containers:
+        - name: kafka-init
+          image: apache/kafka:3.8.1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              BS="kafka-0.kafka-headless.hpe-search.svc.cluster.local:9092,kafka-1.kafka-headless.hpe-search.svc.cluster.local:9092,kafka-2.kafka-headless.hpe-search.svc.cluster.local:9092"
+
+              echo "=== Creating Kafka topics ==="
+              /opt/kafka/bin/kafka-topics.sh \
+                --bootstrap-server "$BS" \
+                --create --if-not-exists \
+                --topic file-upload-events \
+                --partitions 3 \
+                --replication-factor 3
+
+              /opt/kafka/bin/kafka-topics.sh \
+                --bootstrap-server "$BS" \
+                --create --if-not-exists \
+                --topic file-upload-events-dlq \
+                --partitions 3 \
+                --replication-factor 3
+
+              echo "=== Topics ==="
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BS" --list
+              echo "=== Kafka Init complete ==="

@@ -1,0 +1,69 @@
+# ---------------------------------------------------------------------------
+# OpenSearch data — 5 Gi
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: opensearch-data
+  namespace: hpe-search
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+# ---------------------------------------------------------------------------
+# MinIO object storage — 10 Gi
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: hpe-search
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+# ---------------------------------------------------------------------------
+# Redis snapshot — 1 Gi
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  namespace: hpe-search
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+# ---------------------------------------------------------------------------
+# HuggingFace model cache — model-server (text + image models ~4 Gi)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hf-cache-model-server
+  namespace: hpe-search
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+# ---------------------------------------------------------------------------
+# HuggingFace model cache — pyworker (embedding model ~500 Mi)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hf-cache-pyworker
+  namespace: hpe-search
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi

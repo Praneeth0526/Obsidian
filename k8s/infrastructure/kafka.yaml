@@ -1,0 +1,114 @@
+# ---------------------------------------------------------------------------
+# Headless Service — stable DNS for each broker pod
+#   kafka-0.kafka-headless.hpe-search.svc.cluster.local:9092
+#   kafka-1.kafka-headless.hpe-search.svc.cluster.local:9092
+#   kafka-2.kafka-headless.hpe-search.svc.cluster.local:9092
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  namespace: hpe-search
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: kafka
+  ports:
+    - name: broker
+      port: 9092
+    - name: controller
+      port: 9093
+---
+# ClusterIP Service — simple bootstrap address for other services
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: hpe-search
+spec:
+  selector:
+    app: kafka
+  ports:
+    - name: broker
+      port: 9092
+      targetPort: 9092
+---
+# ---------------------------------------------------------------------------
+# StatefulSet — 3-node KRaft cluster
+# Each pod derives its NODE_ID from the ordinal (kafka-0 → 1, kafka-1 → 2 …)
+# and sets its own ADVERTISED_LISTENERS before calling the Kafka entrypoint.
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: hpe-search
+spec:
+  serviceName: kafka-headless
+  podManagementPolicy: Parallel
+  replicas: 3
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+        - name: kafka
+          image: apache/kafka:3.8.1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              ORDINAL="${HOSTNAME##*-}"
+              export KAFKA_NODE_ID="$((ORDINAL + 1))"
+              SVC="kafka-headless.hpe-search.svc.cluster.local"
+              export KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://${HOSTNAME}.${SVC}:9092"
+              export KAFKA_LISTENERS="PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+              exec /etc/kafka/docker/run
+          env:
+            - name: KAFKA_PROCESS_ROLES
+              value: "broker,controller"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@kafka-0.kafka-headless.hpe-search.svc.cluster.local:9093,2@kafka-1.kafka-headless.hpe-search.svc.cluster.local:9093,3@kafka-2.kafka-headless.hpe-search.svc.cluster.local:9093"
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "3"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "3"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "2"
+            - name: KAFKA_DEFAULT_REPLICATION_FACTOR
+              value: "3"
+            - name: KAFKA_MIN_INSYNC_REPLICAS
+              value: "2"
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "false"
+            - name: CLUSTER_ID
+              value: "hpe-search-local-cluster-1"
+          ports:
+            - containerPort: 9092
+            - containerPort: 9093
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"

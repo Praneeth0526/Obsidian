@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pyworker
+  namespace: hpe-search
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pyworker
+  template:
+    metadata:
+      labels:
+        app: pyworker
+    spec:
+      initContainers:
+        - name: wait-for-opensearch
+          image: curlimages/curl:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              until curl -sf http://opensearch:9200/hpe-search-docs; do
+                echo "Waiting for opensearch index..."; sleep 10
+              done
+      containers:
+        - name: pyworker
+          image: hpe-pyworker-2:latest
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: hpe-search-config
+          ports:
+            - containerPort: 50052
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+      volumes:
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: hf-cache-model-server
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pyworker
+  namespace: hpe-search
+spec:
+  selector:
+    app: pyworker
+  ports:
+    - name: grpc
+      port: 50052
+      targetPort: 50052

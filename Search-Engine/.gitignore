@@ -1,0 +1,13 @@
+.env
+minio-data/
+opensearch-data/
+.venv/
+.claude/
+__pycache__/
+*.pyc
+*.pyo
+logs/
+.ai-devkit.json
+Claude_resume.txt
+Project-dessc.txt
+Claude_resume.txt

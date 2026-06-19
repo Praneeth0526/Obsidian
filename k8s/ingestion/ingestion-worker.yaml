@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion-worker
+  namespace: hpe-search
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingestion-worker
+  template:
+    metadata:
+      labels:
+        app: ingestion-worker
+    spec:
+      initContainers:
+        # Don't start consuming until model-server /health is green
+        - name: wait-for-model-server
+          image: curlimages/curl:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              until curl -sf http://model-server:8000/health; do
+                echo "Waiting for model-server..."; sleep 10
+              done
+        # Don't start consuming until opensearch-init job has run
+        - name: wait-for-opensearch
+          image: curlimages/curl:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              until curl -sf http://opensearch:9200/hpe-search-docs; do
+                echo "Waiting for opensearch index..."; sleep 10
+              done
+      containers:
+        - name: ingestion-worker
+          image: hpe-ingestion-worker:latest
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: hpe-search-config
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"

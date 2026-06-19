@@ -1,0 +1,140 @@
+# HPE Search Engine — Project Analysis
+
+## What This Project Is
+
+An **HPE Campus Connect Program** enterprise search engine that lets users **upload files to object storage and search through them using natural language**. It's a hybrid semantic + keyword search system, built as a team project with clearly delineated roles.
+
+---
+
+## Architecture Overview (from Flow.png)
+
+The system has two clearly separated stages:
+
+```
+Stage 1: Background Ingestion (async, event-driven)
+Stage 2: Real-time Search (synchronous, latency-sensitive)
+```
+
+![Architecture Flow](/home/praneeth08/HPE/Search-Engine/Architecture/Flow.png)
+
+---
+
+## Stage 1 — Background Ingestion
+
+| Step | Component | Role |
+|------|-----------|------|
+| 1 | **User** | Uploads a file |
+| 2 | **MinIO** | S3-compatible object store; triggers event on upload |
+| 3 | **Kafka** | Message queue; receives the MinIO event and buffers it |
+| 4 | **PyWorker-1 (Indexer)** | Consumes from Kafka and runs the ingestion pipeline |
+| ↳ | **Apache Tika** | Extracts raw text from PDFs, DOCX, PPTX, images, etc. |
+| ↳ | **LangChain** | Chunks the extracted text (configurable size & overlap) |
+| ↳ | **SentenceTransformers** | Encodes chunks → dense vectors (`all-MiniLM-L6-v2`) |
+| 5 | **OpenSearch** | Stores both dense kNN vectors AND BM25 keyword index in a single cluster |
+
+> Both indexes (semantic kNN + keyword BM25) live **inside one OpenSearch cluster** — this is a key design decision that simplifies the stack by eliminating a separate Qdrant instance.
+
+---
+
+## Stage 2 — Real-time Search
+
+| Step | Component | Role |
+|------|-----------|------|
+| 1 | **User** | Types a natural language query |
+| 2 | **Go Gateway** | REST API entry point; hashes query and checks Redis |
+| 3a | **Redis (hit)** | Returns cached results instantly with TTL |
+| 3b | **Redis (miss)** | Triggers gRPC call to PyWorker-2 |
+| 4 | **PyWorker-2 (Searcher)** | NLP parsing + embedding via gRPC |
+| ↳ | **LangChain** | NLP query parse → extracts intent, keywords, filters |
+| ↳ | **SentenceTransformers** | Embeds the cleaned intent text |
+| 5 | **OpenSearch** | Executes hybrid kNN + BM25 query |
+| 6 | **Go Backend** | Merges Top-K results from both indexes |
+| 7 | **Redis** | Stores final result JSON with TTL |
+| 8 | **Frontend** | Receives snippets + file URLs, renders them |
+
+---
+
+## Current Codebase State (What's Actually Implemented)
+
+### ✅ PyWorker — `pyworker/` (Role 5: Real-time Search NLP Engineer)
+
+This is the most complete component in the repo.
+
+**`search_worker.py`** — Full gRPC server:
+- Implements `SearchWorkerServicer` with a `ProcessQuery` RPC
+- Uses a LangChain `RunnableLambda` pipeline for query parsing
+- Calls `NLPQueryParser` → `EmbeddingService` → `OpenSearch keyword search`
+- Builds structured `SearchQueryResponse` proto messages
+- **Note**: `_semantic_search()` is a placeholder — kNN search is not yet wired to OpenSearch
+
+**`nlp_parser.py`** — Dual-mode NLP parser:
+- **LLM mode** (if `OPENAI_API_KEY` is set): uses LangChain + ChatOpenAI to parse query into JSON `{intent, keywords, filters}`
+- **Rule-based fallback**: regex patterns for dates (`last week`, `yesterday`), sizes (`> 10MB`, `smaller than 5KB`), file types (`pdf`, `images`, `video`), and extensions (`.docx`)
+- Stopword filtering to extract meaningful intent text
+
+**`embedding_service.py`** — Singleton SentenceTransformer wrapper:
+- Loads `all-MiniLM-L6-v2` (384-dim vectors)
+- Offline-first (`TRANSFORMERS_OFFLINE=1`)
+- Returns zero-vector for empty queries
+
+### ✅ Frontend — `frontend/` (Next.js App Router)
+- Single-page search UI (`app/page.js`)
+- Natural language search box with quick-tag buttons (`pdf`, `images`, `last week`, `size > 10MB`)
+- Displays results as cards: filename, bucket, extension, size, date
+- Calls `/api/search?q=...` → Next.js API route → OpenSearch
+
+### ✅ Infrastructure — `docker-compose.yml`
+| Service | Image | Port |
+|---------|-------|------|
+| OpenSearch | `opensearchproject/opensearch:2.19.1` | 9200 |
+| OpenSearch Dashboards | `opensearchproject/opensearch-dashboards:2.19.1` | 5601 |
+| PyWorker | Custom build (`pyworker/Dockerfile`) | 50052 (gRPC) |
+| Frontend | Custom build (`frontend/Dockerfile`) | 3000 |
+
+### ✅ Proto / gRPC contract — `pyworker/proto/`
+- `.proto` file defines `SearchQueryRequest`, `SearchQueryResponse`, `SearchResult`
+- Generated stubs connect Go ↔ Python over gRPC
+
+---
+
+## What's Missing / Gaps vs. Architecture
+
+| Feature | Status |
+|---------|--------|
+| **MinIO** (object store) | ❌ Not in `docker-compose.yml` — handled by another team member |
+| **Kafka** (message queue) | ❌ Not here — belongs to PyWorker-1 / Infra role |
+| **PyWorker-1** (ingestion: Tika + Chunking) | ❌ Not in this folder |
+| **Go Gateway + caching** | ❌ Go backend not present here (Role 4) |
+| **Redis** | ❌ Not in docker-compose — Go backend's responsibility |
+| **kNN / semantic search** | ⚠️ EmbeddingService exists, but `_semantic_search()` returns `[]` (placeholder) |
+| **OpenSearch kNN index** | ⚠️ Index schema may not have `knn_vector` field yet |
+
+---
+
+## Technology Stack Summary
+
+| Layer | Technology |
+|-------|-----------|
+| Object Storage | MinIO (S3-compatible) |
+| Message Queue | Apache Kafka |
+| Text Extraction | Apache Tika |
+| Chunking | LangChain |
+| Embeddings | SentenceTransformers (`all-MiniLM-L6-v2`, 384-dim) |
+| Search DB | OpenSearch (single cluster: BM25 + kNN) |
+| Search API | Python gRPC server (PyWorker-2) |
+| API Gateway | Go (REST → gRPC) |
+| Caching | Redis (TTL-based query cache) |
+| Frontend | Next.js (App Router) |
+| Containerization | Docker / Podman Compose |
+| NLP (optional) | LangChain + OpenAI GPT (fallback: regex rules) |
+
+---
+
+## Key Design Decisions Worth Noting
+
+1. **Single OpenSearch cluster for both BM25 and kNN** — avoids managing Qdrant separately, simplifies infrastructure.
+2. **gRPC between Go and Python** — strongly typed contract, efficient binary serialization, good for latency.
+3. **LLM-optional NLP** — gracefully degrades to rule-based parsing if no OpenAI key is present; production-ready fallback.
+4. **Singleton embedding model** — ensures the 80MB+ SentenceTransformer model is only loaded once per container lifetime.
+5. **Redis TTL cache at the Go gateway** — prevents redundant gRPC + OpenSearch round-trips for repeated queries.
+6. **Kafka as a buffer** — decouples file upload spikes from the ingestion pipeline, preventing overload on PyWorker-1.

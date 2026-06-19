@@ -1,0 +1,494 @@
+services:
+
+  # ===========================================================================
+  # INFRASTRUCTURE LAYER
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Kafka 1 — KRaft node
+  # ---------------------------------------------------------------------------
+  kafka1:
+    image: apache/kafka:3.8.1
+    container_name: hpe-search-kafka-1
+    hostname: kafka1
+    ports:
+      - "29092:29092"
+      - "9093"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka1:9093,2@kafka2:9093,3@kafka3:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka1:9092,PLAINTEXT_HOST://localhost:29092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      CLUSTER_ID: "hpe-search-local-cluster-1"
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Kafka 2 — KRaft node
+  # ---------------------------------------------------------------------------
+  kafka2:
+    image: apache/kafka:3.8.1
+    container_name: hpe-search-kafka-2
+    hostname: kafka2
+    ports:
+      - "29093:29093"
+      - "9093"
+    environment:
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka1:9093,2@kafka2:9093,3@kafka3:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29093,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka2:9092,PLAINTEXT_HOST://localhost:29093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      CLUSTER_ID: "hpe-search-local-cluster-1"
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Kafka 3 — KRaft node
+  # ---------------------------------------------------------------------------
+  kafka3:
+    image: apache/kafka:3.8.1
+    container_name: hpe-search-kafka-3
+    hostname: kafka3
+    ports:
+      - "29094:29094"
+      - "9093"
+    environment:
+      KAFKA_NODE_ID: 3
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka1:9093,2@kafka2:9093,3@kafka3:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29094,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka3:9092,PLAINTEXT_HOST://localhost:29094"
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      CLUSTER_ID: "hpe-search-local-cluster-1"
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Kafka Init — creates topics on the 3-node cluster
+  # ---------------------------------------------------------------------------
+  kafka-init:
+    image: apache/kafka:3.8.1
+    container_name: hpe-search-kafka-init
+    depends_on:
+      kafka1:
+        condition: service_healthy
+      kafka2:
+        condition: service_healthy
+      kafka3:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "=== Creating Kafka topics (3 partitions, 3 replicas) ==="
+        /opt/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka1:9092,kafka2:9092,kafka3:9092 \
+          --create --if-not-exists \
+          --topic file-upload-events \
+          --partitions 3 \
+          --replication-factor 3
+
+        /opt/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka1:9092,kafka2:9092,kafka3:9092 \
+          --create --if-not-exists \
+          --topic file-upload-events-dlq \
+          --partitions 3 \
+          --replication-factor 3
+
+        echo "=== Topics created. Listing: ==="
+        /opt/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka1:9092 \
+          --list
+        echo "=== Kafka Init complete ==="
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # MinIO — S3-compatible object storage
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: hpe-search-minio
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+      MINIO_SITE_NAME: hpe-search-minio
+      MINIO_NOTIFY_KAFKA_ENABLE_1: "on"
+      MINIO_NOTIFY_KAFKA_BROKERS_1: "kafka1:9092,kafka2:9092,kafka3:9092"
+      MINIO_NOTIFY_KAFKA_TOPIC_1: "file-upload-events"
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      kafka1:
+        condition: service_healthy
+      kafka2:
+        condition: service_healthy
+      kafka3:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # MinIO Init — creates the 'uploads' bucket and wires Kafka notifications
+  # ---------------------------------------------------------------------------
+  minio-init:
+    image: minio/mc:latest
+    container_name: hpe-search-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "=== MinIO Init ==="
+        mc alias set local http://minio:9000 minioadmin minioadmin123
+
+        echo "Creating uploads bucket..."
+        mc mb local/uploads --ignore-existing
+
+        echo "Adding s3:ObjectCreated event → Kafka..."
+        mc event add local/uploads arn:minio:sqs::1:kafka --event put || \
+          echo "Event rule already exists, continuing..."
+
+        echo "Verifying events..."
+        mc event list local/uploads
+
+        echo "=== MinIO Init complete ==="
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Apache Tika — text & metadata extraction
+  # ---------------------------------------------------------------------------
+  tika:
+    image: apache/tika:latest
+    container_name: hpe-search-tika
+    ports:
+      - "9998:9998"
+    environment:
+      - TIKA_JAVA_OPTS=-Xmx1g
+    healthcheck:
+      # apache/tika has no wget/curl — use bash built-in TCP to check port 9998
+      test: ["CMD-SHELL", "bash -c 'echo -n > /dev/tcp/localhost/9998' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # ===========================================================================
+  # SHARED DATA LAYER  (one instance shared by both pipelines)
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # OpenSearch — kNN + BM25 hybrid search database
+  # ---------------------------------------------------------------------------
+  opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    container_name: hpe-search-opensearch
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    environment:
+      - discovery.type=single-node
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - DISABLE_SECURITY_PLUGIN=true
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      - plugins.ml_commons.only_run_on_ml_node=false
+      - plugins.ml_commons.allow_registering_model_via_url=true
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # OpenSearch Init — creates the hpe-search-docs index with kNN mapping
+  # ---------------------------------------------------------------------------
+  opensearch-init:
+    image: curlimages/curl:latest
+    container_name: hpe-search-opensearch-init
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    volumes:
+      - ./infrastructure/opensearch/index-mapping.json:/mapping.json:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "=== OpenSearch Init ==="
+        echo "Creating hpe-search-docs index..."
+        curl -sf -X PUT http://opensearch:9200/hpe-search-docs \
+          -H 'Content-Type: application/json' \
+          -d @/mapping.json && echo "Index created!" || echo "Index may already exist, continuing..."
+        echo "=== OpenSearch Init complete ==="
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # OpenSearch Dashboards — UI for inspecting the index
+  # ---------------------------------------------------------------------------
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.19.1
+    container_name: hpe-search-opensearch-dashboards
+    ports:
+      - "5601:5601"
+    environment:
+      - OPENSEARCH_HOSTS=http://opensearch:9200
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Redis — search result cache (Steps 1 & 4 of search pipeline)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7.2-alpine
+    container_name: hpe-search-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --loglevel notice
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ===========================================================================
+  # INGESTION PIPELINE
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Model Server — FastAPI text + image embedding (384-dim)
+  # ---------------------------------------------------------------------------
+  model-server:
+    build:
+      context: .
+      dockerfile: workers/model-server/Dockerfile
+    image: hpe-model-server:latest
+    container_name: hpe-search-model-server
+    ports:
+      - "8000:8000"
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+      - MODEL_SERVER_HOST=0.0.0.0
+      - MODEL_SERVER_PORT=8000
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Ingestion Worker — Kafka consumer → Tika → chunk → embed → OpenSearch
+  # ---------------------------------------------------------------------------
+  ingestion-worker:
+    build:
+      context: .
+      dockerfile: workers/ingestion/Dockerfile
+    image: hpe-ingestion-worker:latest
+    container_name: hpe-search-ingestion-worker
+    environment:
+      # Kafka
+      KAFKA_BOOTSTRAP_SERVERS: kafka1:9092,kafka2:9092,kafka3:9092
+      KAFKA_GROUP_ID: ${KAFKA_GROUP_ID:-ingestion-worker}
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-file-upload-events}
+      # MinIO
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin123}
+      MINIO_SECURE: "false"
+      MINIO_PUBLIC_URL: http://minio:9000
+      # Tika
+      TIKA_SERVER_URL: http://tika:9998
+      # Model server
+      MODEL_SERVER_URL: http://model-server:8000
+      # OpenSearch
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCH_PORT: 9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-hpe-search-docs}
+      OPENSEARCH_BULK_CHUNK_SIZE: ${OPENSEARCH_BULK_CHUNK_SIZE:-200}
+      OPENSEARCH_MAX_RETRIES: ${OPENSEARCH_MAX_RETRIES:-5}
+      OPENSEARCH_RETRY_BASE_DELAY: ${OPENSEARCH_RETRY_BASE_DELAY:-1.0}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      kafka1:
+        condition: service_healthy
+      kafka2:
+        condition: service_healthy
+      kafka3:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      tika:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      opensearch-init:
+        condition: service_completed_successfully
+      model-server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ===========================================================================
+  # SEARCH PIPELINE
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # PyWorker-2 — gRPC search worker: NLP parse → embed → OpenSearch hybrid query
+  # ---------------------------------------------------------------------------
+  pyworker-2:
+    build:
+      context: ./Search-Engine
+      dockerfile: pyworker/Dockerfile
+    image: hpe-pyworker-2:latest
+    container_name: hpe-search-pyworker-2
+    environment:
+      GRPC_HOST: 0.0.0.0
+      GRPC_SEARCH_PORT: 50052
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCH_PORT: 9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-hpe-search-docs}
+      SEARCH_KNN_K: ${SEARCH_KNN_K:-50}
+      SEARCH_BM25_BOOST: ${SEARCH_BM25_BOOST:-0.4}
+      SEARCH_KNN_BOOST: ${SEARCH_KNN_BOOST:-0.6}
+      SEARCH_DEFAULT_SIZE: ${SEARCH_DEFAULT_SIZE:-10}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PYTHONUNBUFFERED: 1
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    ports:
+      - "50052:50052"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      opensearch-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Go API Gateway — REST entry point with Redis cache (Steps 1 & 4)
+  # ---------------------------------------------------------------------------
+  go-gateway:
+    build:
+      context: ./Search-Engine
+      dockerfile: gateway/Dockerfile
+    image: hpe-go-gateway:latest
+    container_name: hpe-search-go-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      GATEWAY_PORT: 8080
+      PYWORKER_HOST: pyworker-2
+      PYWORKER_PORT: 50052
+      # Redis cache
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_PASSWORD: ""
+      REDIS_TTL_DEFAULT: ${REDIS_TTL_DEFAULT:-300}
+      REDIS_TTL_POPULAR: ${REDIS_TTL_POPULAR:-1800}
+      REDIS_POPULAR_THRESHOLD: ${REDIS_POPULAR_THRESHOLD:-10}
+    depends_on:
+      pyworker-2:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Frontend — Next.js HPE-themed search UI
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./Search-Engine
+      dockerfile: frontend/Dockerfile
+    image: hpe-frontend:latest
+    container_name: hpe-search-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8080}
+      GATEWAY_URL: http://go-gateway:8080
+      OPENSEARCH_HOST: opensearch
+      OPENSEARCH_PORT: 9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-hpe-search-docs}
+    depends_on:
+      - go-gateway
+    restart: unless-stopped
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+volumes:
+  minio-data:
+    name: hpe-search-minio-data
+  opensearch-data:
+    name: hpe-search-opensearch-data
+  redis-data:
+    name: hpe-search-redis-data
+  hf-cache:
+    name: hpe-search-hf-cache

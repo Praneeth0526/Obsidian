@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tika
+  namespace: hpe-search
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tika
+  template:
+    metadata:
+      labels:
+        app: tika
+    spec:
+      containers:
+        - name: tika
+          image: apache/tika:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9998
+          env:
+            - name: TIKA_JAVA_OPTS
+              value: "-Xmx1g"
+          readinessProbe:
+            tcpSocket:
+              port: 9998
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 5
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "100m"
+            limits:
+              memory: "1.5Gi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tika
+  namespace: hpe-search
+spec:
+  selector:
+    app: tika
+  ports:
+    - port: 9998
+      targetPort: 9998

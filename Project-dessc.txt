@@ -1,0 +1,86 @@
+1. Infrastructure & Messaging Engineer
+
+Set up MinIO, configure bucket policies, enable s3:ObjectCreated event notifications
+Deploy and configure Apache Kafka (topics, partitions, retention)
+Write the Kafka consumer that picks up MinIO events and forwards payload to PyWorker-1
+Handle Dead Letter Queue for failed ingestion events
+Manage Podman volumes and container networking for MinIO + Kafka
+
+
+2. AI Ingestion Specialist (PyWorker-1)
+
+Build PyWorker-1 in Python
+Integrate Apache Tika to extract text from PDFs, DOCX, etc.
+Use LangChain for chunking strategy (chunk size, overlap tuning)
+Generate embeddings using SentenceTransformers (all-MiniLM-L2-v2)
+Pass processed chunks + vectors to Role 3 for storage
+
+
+3. Search Database Administrator
+
+Deploy OpenSearch (single cluster) with both kNN vector index and BM25 keyword index
+Write the upsert logic that Role 2 calls after embedding (dense vector + keyword fields)
+Tune relevance scoring, manage index health and filter configuration
+
+
+4. Backend Orchestration & Caching Engineer (Go)
+
+Build the Go API Gateway (REST endpoints for query intake)
+Implement Redis cache check — hash the query, lookup, return on hit
+On cache miss, trigger gRPC call to PyWorker-2 (Role 5)
+Receive hybrid results from OpenSearch (kNN + BM25 combined), merge Top-K
+Store final JSON in Redis with TTL, return snippets + URLs to frontend
+
+
+5. Real-Time Search NLP Engineer (PyWorker-2)
+
+Build PyWorker-2 in Python
+Set up gRPC server (write .proto, generate stubs for Go ↔ Python)
+Use spaCy for NLP query parsing (intent, keyword extraction) — fully open-source
+Generate query vector using SentenceTransformers
+Trigger hybrid kNN + BM25 search against a single OpenSearch cluster
+Return merged results back to Go via gRPC
+
+
+---
+
+Production NLP Search (Future Plan)
+
+Goal:
+Replace the current template/rule-based parsing with a robust NLP model that can
+understand user intent, extract structured filters, and map them into OpenSearch
+queries. This enables reliable natural language search in production.
+
+Supported File Formats (must be indexed and queryable):
+- PDF
+- DOCX
+- Images
+- Text files
+- PPTX
+
+NLP Output Schema (example):
+{
+	intent: "search",
+	keywords: ["marketing", "deck"],
+	filters: [
+		"type:pdf",
+		"date:2026-05-07",
+		"size_gt:10MB"
+	]
+}
+
+Mapping Rules (NLP -> OpenSearch):
+- type:pdf -> extension: pdf OR content_type: application/pdf
+- type:docx -> content_type: application/vnd.openxmlformats-officedocument.wordprocessingml.document
+- type:pptx -> content_type: application/vnd.openxmlformats-officedocument.presentationml.presentation
+- type:image -> content_type prefix: image/
+- type:text -> content_type: text/plain
+- date:YYYY-MM-DD -> last_modified range for that day
+- size_gt/size_lt -> size_bytes range filter
+
+Implementation Notes:
+- Use an LLM or domain-tuned NLP model to extract intent, keywords, and filters.
+- Validate filters and fall back to keyword-only search when NLP is uncertain.
+- Keep embeddings for semantic matching (future kNN in OpenSearch).
+
+
