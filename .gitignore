@@ -20,6 +20,8 @@ __pycache__/
 # Graphify and Agents
 .agents/
 graphify-out/
+graphify-out
+/graphify-out
 
 # Ingestion outputs
 output_dims/
