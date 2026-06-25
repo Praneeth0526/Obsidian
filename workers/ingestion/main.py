@@ -2,12 +2,14 @@ import asyncio
 import json
 import logging
 import os
+import signal
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List
 from urllib.parse import unquote_plus
 
-from confluent_kafka import Consumer, KafkaError
+from confluent_kafka import Consumer, KafkaError, Producer
 from minio import Minio
 import httpx
 
@@ -25,6 +27,7 @@ logger = logging.getLogger(__name__)
 KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:29092")
 KAFKA_GROUP_ID          = os.environ.get("KAFKA_GROUP_ID", "ingestion-worker")
 KAFKA_TOPIC             = os.environ.get("KAFKA_TOPIC", "file-upload-events")
+KAFKA_DLQ_TOPIC         = os.environ.get("KAFKA_DLQ_TOPIC", "file-upload-events-dlq")
 
 # ── MinIO ──────────────────────────────────────────────────────────────────────
 MINIO_ENDPOINT   = os.environ.get("MINIO_ENDPOINT", "localhost:9000")
@@ -32,6 +35,15 @@ MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "minioadmin123")
 MINIO_SECURE     = os.environ.get("MINIO_SECURE", "false").lower() == "true"
 MINIO_PUBLIC_URL = os.environ.get("MINIO_PUBLIC_URL", "http://localhost:9000")
+
+# ── File size limit ────────────────────────────────────────────────────────────
+# Files exceeding this limit are routed to the DLQ instead of downloaded.
+# Default: 100 MB. Set MAX_FILE_SIZE_BYTES=0 to disable the guard.
+MAX_FILE_SIZE_BYTES = int(os.environ.get("MAX_FILE_SIZE_BYTES", str(100 * 1024 * 1024)))
+
+# ── Concurrency ────────────────────────────────────────────────────────────────
+# Maximum number of Kafka messages processed concurrently.
+MAX_CONCURRENT_EVENTS = int(os.environ.get("MAX_CONCURRENT_EVENTS", "4"))
 
 # ── Debug output (optional) ────────────────────────────────────────────────────
 # Set DEBUG_OUTPUT=true to also dump processed chunks to output_dims/ as JSON.
@@ -43,13 +55,26 @@ if DEBUG_OUTPUT:
 
 class IngestionWorker:
     def __init__(self):
-        # ── Kafka Consumer ─────────────────────────────────────────────────────
+        # ── Kafka Consumer — manual offset commits for at-least-once delivery ──
+        # enable.auto.commit is intentionally disabled.  We commit only after
+        # the message has been fully processed (or sent to the DLQ), so a crash
+        # mid-processing will cause the message to be re-delivered rather than
+        # silently lost.
         self.consumer = Consumer({
             'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS,
             'group.id': KAFKA_GROUP_ID,
-            'auto.offset.reset': 'earliest'
+            'auto.offset.reset': 'earliest',
+            'enable.auto.commit': False,   # ← manual commits only
         })
         self.consumer.subscribe([KAFKA_TOPIC])
+
+        # ── Kafka DLQ Producer ─────────────────────────────────────────────────
+        # Failures are published here so they can be inspected, retried, or
+        # alerted on without losing the original event payload.
+        self.dlq_producer = Producer({
+            'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS,
+            'acks': 'all',               # wait for all ISR brokers to ack
+        })
 
         # ── MinIO Client ───────────────────────────────────────────────────────
         self.minio_client = Minio(
@@ -63,7 +88,7 @@ class IngestionWorker:
         self.tika_extractor = TikaExtractor(tika_url=os.environ.get("TIKA_SERVER_URL", "http://localhost:9998"))
         self.text_chunker   = TextChunker()
         self.image_handler  = ImageHandler()
-        self.model_client   = ModelClient()  # Uses MODEL_SERVER_URL env, defaults to http://localhost:8000
+        self.model_client   = ModelClient()  # Uses MODEL_SERVER_URL env, defaults to http://localhost:8001
 
         # ── OpenSearch Storage ─────────────────────────────────────────────────
         self.os_client = OpenSearchClient()
@@ -71,6 +96,67 @@ class IngestionWorker:
             logger.warning("OpenSearch health check failed at startup — will retry on first write")
         else:
             logger.info("OpenSearch cluster is healthy")
+
+        # ── Concurrency semaphore ──────────────────────────────────────────────
+        # Limits the number of events processed concurrently so we don't
+        # overwhelm Tika / the model server under a burst of uploads.
+        self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_EVENTS)
+
+        # ── Graceful shutdown flag ─────────────────────────────────────────────
+        self._shutdown = False
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Graceful shutdown helpers
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _install_signal_handlers(self) -> None:
+        """Install SIGTERM / SIGINT handlers for clean Kubernetes pod shutdown."""
+        loop = asyncio.get_event_loop()
+
+        def _handle_signal(sig):
+            logger.info("Received signal %s — initiating graceful shutdown", sig.name)
+            self._shutdown = True
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, _handle_signal, sig)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # DLQ helpers
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _publish_to_dlq(
+        self,
+        original_payload: bytes,
+        error: str,
+        bucket: str = "",
+        key: str = "",
+    ) -> None:
+        """
+        Publish the original Kafka message payload to the DLQ topic, augmented
+        with error context, so failed events can be inspected and retried.
+        """
+        dlq_record = {
+            "original_payload": original_payload.decode("utf-8", errors="replace"),
+            "error": error,
+            "bucket": bucket,
+            "key": key,
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self.dlq_producer.produce(
+                KAFKA_DLQ_TOPIC,
+                value=json.dumps(dlq_record).encode("utf-8"),
+            )
+            self.dlq_producer.flush(timeout=10)
+            logger.info("Published failed event to DLQ: bucket=%s key=%s", bucket, key)
+        except Exception as dlq_exc:
+            # Log but don't raise — we don't want a DLQ failure to mask the
+            # original error or prevent the offset from being committed.
+            logger.error("Failed to publish to DLQ: %s", dlq_exc)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Core event processing
+    # ─────────────────────────────────────────────────────────────────────────
 
     async def process_event(self, event: Dict[str, Any]):
         """Process a single S3 event from MinIO."""
@@ -97,110 +183,227 @@ class IngestionWorker:
             object_key   = f"{bucket}/{key}"
             download_url = f"{MINIO_PUBLIC_URL}/{bucket}/{key}"
 
+            # ── File-size guard ────────────────────────────────────────────────
+            # Prevent loading enormous files into memory.  Oversized files are
+            # sent to the DLQ rather than silently dropped.
+            if MAX_FILE_SIZE_BYTES > 0 and size_bytes > MAX_FILE_SIZE_BYTES:
+                logger.warning(
+                    "File too large — skipping: bucket=%s key=%s size=%d limit=%d",
+                    bucket, key, size_bytes, MAX_FILE_SIZE_BYTES,
+                )
+                return  # caller will publish to DLQ with this error context
+
             logger.info(f"Processing s3 object: bucket={bucket}, key={key}, content_type={content_type}")
 
-            try:
-                # 1. Download file from MinIO
-                response   = self.minio_client.get_object(bucket, key)
-                file_bytes = response.read()
-                response.close()
-                response.release_conn()
+            # 1. Download file from MinIO
+            response   = self.minio_client.get_object(bucket, key)
+            file_bytes = response.read()
+            response.close()
+            response.release_conn()
 
-                # 2. Route based on content-type
-                is_image   = content_type.startswith("image/")
-                uploaded_at = datetime.now(timezone.utc).isoformat()
-                filename   = key.split("/")[-1]
-                extension  = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-
-                if is_image:
-                    logger.info(f"Handling as image: {key}")
-                    image_result = await asyncio.to_thread(self.image_handler.process, file_bytes, content_type)
-                    vector       = await self.model_client.embed_image(image_result.image_bytes, "image/jpeg")
-
-                    doc = ChunkDocument(
-                        object_key   = object_key,
-                        bucket       = bucket,
-                        filename     = filename,
-                        extension    = extension,
-                        mime_type    = content_type,
-                        download_url = download_url,
-                        size_bytes   = size_bytes,
-                        uploaded_at  = uploaded_at,
-                        chunk_index  = 0,
-                        chunk_total  = 1,
-                        chunk_text   = "",          # images have no text chunk
-                        embedding    = vector,
-                    )
-                    await asyncio.to_thread(self.os_client.upsert, doc)
-                    logger.info(f"Indexed image: {object_key}")
-
-                    if DEBUG_OUTPUT:
-                        self._debug_dump(bucket, key, {
-                            "type": "image", "bucket": bucket, "key": key,
-                            "vector": vector, "metadata": image_result.metadata,
-                        })
-
-                else:
-                    logger.info(f"Handling as document/text: {key}")
-                    tika_result = await self.tika_extractor.extract(file_bytes, content_type)
-
-                    if not tika_result.text.strip():
-                        logger.warning(f"No text extracted from {key}. Skipping.")
-                        continue
-
-                    chunks  = self.text_chunker.chunk(tika_result.text)
-                    vectors = await self.model_client.embed_texts([c.text for c in chunks])
-
-                    docs: List[ChunkDocument] = []
-                    for chunk, vector in zip(chunks, vectors):
-                        docs.append(ChunkDocument(
-                            object_key   = object_key,
-                            bucket       = bucket,
-                            filename     = filename,
-                            extension    = extension,
-                            mime_type    = content_type,
-                            download_url = download_url,
-                            size_bytes   = size_bytes,
-                            uploaded_at  = uploaded_at,
-                            chunk_index  = chunk.chunk_index,
-                            chunk_total  = len(chunks),
-                            chunk_text   = chunk.text,
-                            embedding    = vector,
-                        ))
-
-                    result = await asyncio.to_thread(self.os_client.bulk_upsert, docs)
+            # 2. Auto-detect content-type if the event reported octet-stream
+            if content_type == "application/octet-stream":
+                detected = await self.tika_extractor.detect_type(file_bytes)
+                if detected:
                     logger.info(
-                        f"Indexed {result['success']}/{len(docs)} chunks for {object_key}"
-                        + (f" ({result['failed']} failed)" if result['failed'] else "")
+                        "Content-type auto-detected: %s → %s (bucket=%s key=%s)",
+                        content_type, detected, bucket, key,
                     )
+                    content_type = detected
 
-                    if DEBUG_OUTPUT:
-                        self._debug_dump(bucket, key, {
-                            "type": "document", "bucket": bucket, "key": key,
-                            "metadata": tika_result.metadata,
-                            "chunks": [
-                                {"chunk_index": c.chunk_index, "text": c.chunk_text, "vector": c.embedding}
-                                for c in docs
-                            ],
-                        })
+            # 3. Route based on content-type
+            is_image   = content_type.startswith("image/")
+            uploaded_at = datetime.now(timezone.utc).isoformat()
+            filename   = key.split("/")[-1]
+            extension  = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+            if is_image:
+                await self._process_image(
+                    file_bytes, content_type, object_key, bucket,
+                    filename, extension, download_url, size_bytes, uploaded_at,
+                )
+            else:
+                await self._process_document(
+                    file_bytes, content_type, object_key, bucket,
+                    filename, extension, download_url, size_bytes, uploaded_at,
+                )
+
+    async def _process_image(
+        self,
+        file_bytes: bytes,
+        content_type: str,
+        object_key: str,
+        bucket: str,
+        filename: str,
+        extension: str,
+        download_url: str,
+        size_bytes: int,
+        uploaded_at: str,
+    ) -> None:
+        """Preprocess and embed a single image file."""
+        logger.info("Handling as image: %s", object_key)
+        image_result = await asyncio.to_thread(self.image_handler.process, file_bytes, content_type)
+
+        if not image_result.success:
+            raise RuntimeError(f"Image preprocessing failed: {image_result.error}")
+
+        vector = await self.model_client.embed_image(image_result.image_bytes, "image/jpeg")
+
+        # Build a searchable text description so BM25 can surface images.
+        # Without this, images have no keyword representation and are invisible
+        # to the BM25 side of the hybrid search.
+        bm25_text = (
+            f"Image: {filename} "
+            f"({image_result.orig_width}x{image_result.orig_height} pixels, "
+            f"{content_type})"
+        )
+
+        doc = ChunkDocument(
+            object_key   = object_key,
+            bucket       = bucket,
+            filename     = filename,
+            extension    = extension,
+            mime_type    = content_type,
+            download_url = download_url,
+            size_bytes   = size_bytes,
+            uploaded_at  = uploaded_at,
+            chunk_index  = 0,
+            chunk_total  = 1,
+            chunk_text   = bm25_text,
+            embedding    = vector,
+        )
+        await asyncio.to_thread(self.os_client.upsert, doc)
+        logger.info("Indexed image: %s", object_key)
+
+        if DEBUG_OUTPUT:
+            self._debug_dump(bucket, object_key.split("/", 1)[-1], {
+                "type": "image", "bucket": bucket, "key": object_key,
+                "vector": vector,
+                "metadata": {
+                    "orig_width": image_result.orig_width,
+                    "orig_height": image_result.orig_height,
+                    "orig_mode": image_result.orig_mode,
+                },
+            })
+
+    async def _process_document(
+        self,
+        file_bytes: bytes,
+        content_type: str,
+        object_key: str,
+        bucket: str,
+        filename: str,
+        extension: str,
+        download_url: str,
+        size_bytes: int,
+        uploaded_at: str,
+    ) -> None:
+        """Extract, chunk, embed, and index a text-based document."""
+        logger.info("Handling as document/text: %s", object_key)
+        tika_result = await self.tika_extractor.extract(file_bytes, content_type)
+
+        if not tika_result.text.strip():
+            logger.warning(f"No text extracted from {object_key}. Skipping.")
+            return
+
+        chunks  = self.text_chunker.chunk(tika_result.text)
+        vectors = await self.model_client.embed_texts([c.text for c in chunks])
+
+        # Extract useful fields from Tika metadata for richer search filtering.
+        meta          = tika_result.metadata
+        doc_language  = meta.get("Content-Language") or meta.get("language") or "en"
+        doc_author    = meta.get("dc:creator") or meta.get("Author") or ""
+        doc_title     = meta.get("dc:title") or meta.get("title") or filename
+        doc_tags: List[str] = []
+        if doc_author:
+            doc_tags.append(f"author:{doc_author}")
+        if doc_title and doc_title != filename:
+            doc_tags.append(f"title:{doc_title}")
+
+        docs: List[ChunkDocument] = []
+        for chunk, vector in zip(chunks, vectors):
+            docs.append(ChunkDocument(
+                object_key   = object_key,
+                bucket       = bucket,
+                filename     = filename,
+                extension    = extension,
+                mime_type    = content_type,
+                download_url = download_url,
+                size_bytes   = size_bytes,
+                uploaded_at  = uploaded_at,
+                chunk_index  = chunk.chunk_index,
+                chunk_total  = len(chunks),
+                chunk_text   = chunk.text,
+                embedding    = vector,
+                language     = doc_language,
+                tags         = doc_tags,
+            ))
+
+        result = await asyncio.to_thread(self.os_client.bulk_upsert, docs)
+        logger.info(
+            "Indexed %d/%d chunks for %s%s",
+            result['success'], len(docs), object_key,
+            f" ({result['failed']} failed)" if result['failed'] else "",
+        )
+
+        if DEBUG_OUTPUT:
+            self._debug_dump(bucket, object_key.split("/", 1)[-1], {
+                "type": "document", "bucket": bucket, "key": object_key,
+                "metadata": tika_result.metadata,
+                "chunks": [
+                    {"chunk_index": c.chunk_index, "text": c.chunk_text, "vector": c.embedding}
+                    for c in docs
+                ],
+            })
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Main loop
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _handle_message(self, msg) -> None:
+        """
+        Decode and process one Kafka message under the concurrency semaphore.
+        On success: commit the offset.
+        On failure: publish to DLQ, then commit the offset so the bad message
+                    is not re-delivered endlessly.
+        """
+        raw_value = msg.value()
+        bucket = key = ""
+
+        async with self._semaphore:
+            try:
+                event_data = json.loads(raw_value.decode('utf-8'))
+
+                # Pull bucket/key for DLQ context before processing
+                records = event_data.get("Records", [])
+                if records:
+                    s3 = records[0].get("s3", {})
+                    bucket = s3.get("bucket", {}).get("name", "")
+                    key    = unquote_plus(s3.get("object", {}).get("key", ""))
+
+                await self.process_event(event_data)
+
+            except json.JSONDecodeError:
+                logger.error("Failed to decode Kafka message as JSON — publishing to DLQ")
+                self._publish_to_dlq(raw_value, "JSONDecodeError", bucket, key)
 
             except Exception as e:
-                logger.error(f"Error processing {key}: {e}", exc_info=True)
-                # In a production system, publish to the DLQ here
+                logger.error("Error processing %s/%s: %s", bucket, key, e, exc_info=True)
+                self._publish_to_dlq(raw_value, str(e), bucket, key)
 
-    def _debug_dump(self, bucket: str, key: str, data: Dict[str, Any]) -> None:
-        """Optionally write processed output to output_dims/ for local debugging."""
-        safe_key  = key.replace("/", "_")
-        out_file  = OUTPUT_DIR / f"{bucket}_{safe_key}.json"
-        with open(out_file, "w") as f:
-            json.dump(data, f, indent=2)
-        logger.debug(f"Debug dump written to {out_file}")
+            finally:
+                # Commit regardless of outcome — after DLQ publish the event is
+                # safely persisted; re-delivering it would just DLQ it again.
+                await asyncio.to_thread(self.consumer.commit, msg)
 
     async def run(self):
-        logger.info("Starting ingestion worker loop...")
+        self._install_signal_handlers()
+        logger.info("Starting ingestion worker loop (max_concurrent=%d)...", MAX_CONCURRENT_EVENTS)
+
+        pending: set[asyncio.Task] = set()
+
         try:
-            while True:
-                # Use asyncio.to_thread for blocking Kafka poll
+            while not self._shutdown:
                 msg = await asyncio.to_thread(self.consumer.poll, 1.0)
 
                 if msg is None:
@@ -208,19 +411,33 @@ class IngestionWorker:
                 if msg.error():
                     if msg.error().code() == KafkaError._PARTITION_EOF:
                         continue
-                    logger.error(f"Kafka error: {msg.error()}")
+                    logger.error("Kafka error: %s", msg.error())
                     continue
 
-                # Process message
-                try:
-                    event_data = json.loads(msg.value().decode('utf-8'))
-                    await self.process_event(event_data)
-                except json.JSONDecodeError:
-                    logger.error("Failed to decode Kafka message as JSON")
-                except Exception as e:
-                    logger.error(f"Unexpected error processing Kafka message: {e}", exc_info=True)
+                # Spawn a task for each message — the semaphore inside
+                # _handle_message limits actual concurrency.
+                task = asyncio.create_task(self._handle_message(msg))
+                pending.add(task)
+                task.add_done_callback(pending.discard)
+
+            # Drain in-flight tasks before shutting down
+            if pending:
+                logger.info("Shutdown: waiting for %d in-flight task(s) to finish...", len(pending))
+                await asyncio.gather(*pending, return_exceptions=True)
+
         finally:
             self.consumer.close()
+            self.dlq_producer.flush(timeout=15)
+            logger.info("Ingestion worker shut down cleanly.")
+
+
+    def _debug_dump(self, bucket: str, key: str, data: Dict[str, Any]) -> None:
+        """Optionally write processed output to output_dims/ for local debugging."""
+        safe_key  = key.replace("/", "_")
+        out_file  = OUTPUT_DIR / f"{bucket}_{safe_key}.json"
+        with open(out_file, "w") as f:
+            json.dump(data, f, indent=2)
+        logger.debug("Debug dump written to %s", out_file)
 
 
 if __name__ == "__main__":
