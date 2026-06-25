@@ -74,6 +74,11 @@ class TextChunker:
             chunk_overlap=chunk_overlap,
             separators=separators or ["\n\n", "\n", " ", ""],
             strip_whitespace=True,
+            # add_start_index=True tells LangChain to store the character
+            # offset of each chunk inside its Document metadata.  This is
+            # more reliable than computing offsets ourselves with str.find()
+            # which can mis-locate repeated text spans.
+            add_start_index=True,
         )
 
     # ------------------------------------------------------------------
@@ -83,6 +88,12 @@ class TextChunker:
     def chunk(self, text: str) -> list[ChunkResult]:
         """
         Split *text* into overlapping chunks with positional metadata.
+
+        Character offsets are sourced directly from LangChain's
+        ``create_documents()`` output (via ``add_start_index=True``), which
+        tracks the exact byte position of each chunk as it splits.  This
+        avoids the fragile ``str.find()`` approach that can return wrong
+        offsets when the same phrase appears multiple times in a document.
 
         Args:
             text: The full extracted text to be chunked.
@@ -108,43 +119,36 @@ class TextChunker:
             )
             return []
 
-        # --- Split using LangChain ------------------------------------
-        raw_chunks: list[str] = self._splitter.split_text(stripped)
+        # --- Split using LangChain — returns Documents with start_index -----
+        # create_documents() with add_start_index=True populates
+        # doc.metadata["start_index"] with the character offset at which
+        # the chunk begins inside the original (stripped) text.
+        docs = self._splitter.create_documents([stripped])
 
         # --- Filter out tiny fragments --------------------------------
-        raw_chunks = [c for c in raw_chunks if len(c) >= self.min_chunk_size]
+        docs = [d for d in docs if len(d.page_content) >= self.min_chunk_size]
 
-        if not raw_chunks:
+        if not docs:
             logger.warning("All chunks were below min_chunk_size after splitting")
             return []
 
-        # --- Compute character offsets --------------------------------
-        total = len(raw_chunks)
+        total = len(docs)
         results: list[ChunkResult] = []
-        search_from = 0
 
-        for idx, chunk_text in enumerate(raw_chunks):
-            start = stripped.find(chunk_text, search_from)
-            if start == -1:
-                # Fallback: search from the beginning (shouldn't happen,
-                # but protects against edge cases with overlapping chunks).
-                start = stripped.find(chunk_text)
-            end = start + len(chunk_text) if start != -1 else -1
+        for idx, doc in enumerate(docs):
+            chunk_text  = doc.page_content
+            start_char  = doc.metadata.get("start_index", -1)
+            end_char    = start_char + len(chunk_text) if start_char != -1 else -1
 
             results.append(
                 ChunkResult(
                     text=chunk_text,
                     chunk_index=idx,
-                    start_char=start,
-                    end_char=end,
+                    start_char=start_char,
+                    end_char=end_char,
                     total_chunks=total,
                 )
             )
-
-            # Advance search position — but only to the end minus overlap,
-            # so the next chunk (which overlaps) is found at the right spot.
-            if start != -1:
-                search_from = start + len(chunk_text) - self.chunk_overlap
 
         logger.info(
             "Chunked text into %d chunks (chunk_size=%d, overlap=%d)",
