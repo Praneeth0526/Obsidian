@@ -10,7 +10,7 @@ Currently supported formats:
     - PowerPoint (.ppt, .pptx)
     - Plain Text (.txt)
 
-Image support (JPEG, PNG, etc.) will be added in a later stage.
+Image support (JPEG, PNG, etc.) is handled by image_handler.py.
 
 Usage:
     extractor = TikaExtractor(tika_url="http://localhost:9998")
@@ -19,6 +19,7 @@ Usage:
     print(result.metadata)
 """
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
@@ -52,7 +53,6 @@ class ExtractionResult:
 # ---------------------------------------------------------------------------
 
 # MIME types supported in Stage 1.
-# TODO: Add image types (image/jpeg, image/png, etc.) in a later stage.
 SUPPORTED_TYPES: set[str] = {
     # PDF
     "application/pdf",
@@ -62,8 +62,12 @@ SUPPORTED_TYPES: set[str] = {
     # PowerPoint — .ppt (legacy) and .pptx (OpenXML)
     "application/vnd.ms-powerpoint",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    # Plain text
+    # Spreadsheets — .xls (legacy) and .xlsx (OpenXML)
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    # Plain text and CSV
     "text/plain",
+    "text/csv",
 }
 
 
@@ -80,9 +84,12 @@ class TikaExtractor:
     """
     Async client for the Apache Tika REST API.
 
+    A single persistent ``httpx.AsyncClient`` is reused across all requests to
+    enable HTTP connection pooling to the Tika server.  Call ``await close()``
+    when the extractor is no longer needed (or use it as an async context manager).
+
     Endpoints used:
-        PUT /tika          — extract plain text
-        PUT /meta          — extract metadata (author, pages, dates, etc.)
+        PUT /rmeta/text    — extract plain text AND metadata in one round trip
         PUT /detect/stream — auto-detect MIME type
     """
 
@@ -95,6 +102,23 @@ class TikaExtractor:
         self.tika_url = tika_url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
+        # Persistent client — reused across all requests to avoid the overhead
+        # of a new TCP handshake for every extraction call.
+        self._client = httpx.AsyncClient(timeout=self.timeout)
+
+    # ------------------------------------------------------------------
+    # Async context manager support
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        await self.close()
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client and release connections."""
+        await self._client.aclose()
 
     # ------------------------------------------------------------------
     # Public API
@@ -104,15 +128,18 @@ class TikaExtractor:
         self,
         file_bytes: bytes,
         content_type: str = "application/octet-stream",
-        extract_metadata: bool = True,
     ) -> ExtractionResult:
         """
-        Extract text (and optionally metadata) from raw file bytes.
+        Extract text and metadata from raw file bytes in a single Tika call.
+
+        Uses the ``/rmeta/text`` endpoint which returns both the extracted
+        plain text and all metadata as a JSON array in one HTTP round trip.
+        This replaces the previous two-call approach (``/tika`` + ``/meta``),
+        cutting Tika I/O in half for every document.
 
         Args:
-            file_bytes:       Raw bytes of the uploaded file.
-            content_type:     MIME type (from the Kafka event's contentType).
-            extract_metadata: If True, also calls /meta for structured metadata.
+            file_bytes:   Raw bytes of the uploaded file.
+            content_type: MIME type (from the Kafka event's contentType).
 
         Returns:
             ExtractionResult with .text, .metadata, .success, and .error.
@@ -122,17 +149,36 @@ class TikaExtractor:
                 text="", success=False, error="Empty file bytes provided"
             )
 
-        text = await self._extract_text(file_bytes, content_type)
-        if text is None:
+        raw = await self._put_request(
+            endpoint="/rmeta/text",
+            file_bytes=file_bytes,
+            content_type=content_type,
+            accept="application/json",
+        )
+
+        if raw is None:
             return ExtractionResult(
-                text="", success=False, error="Tika text extraction failed"
+                text="", success=False, error="Tika extraction failed"
             )
 
-        metadata: dict = {}
-        if extract_metadata:
-            metadata = await self._extract_metadata(file_bytes, content_type)
+        # /rmeta/text returns a JSON array — one object per embedded resource.
+        # The first element corresponds to the top-level document.
+        try:
+            rmeta = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Failed to parse Tika /rmeta/text response as JSON")
+            return ExtractionResult(text="", success=False, error="Invalid JSON from Tika")
 
-        result = ExtractionResult(text=text.strip(), metadata=metadata)
+        if not isinstance(rmeta, list) or not rmeta:
+            return ExtractionResult(text="", success=False, error="Tika returned empty rmeta list")
+
+        top = rmeta[0]
+        # The extracted plain text is stored under the "X-TIKA:content" key.
+        text = (top.get("X-TIKA:content") or "").strip()
+        # All other keys in the object are metadata fields.
+        metadata = {k: v for k, v in top.items() if k != "X-TIKA:content"}
+
+        result = ExtractionResult(text=text, metadata=metadata)
 
         if result.is_empty:
             logger.warning(
@@ -146,7 +192,8 @@ class TikaExtractor:
         """
         Auto-detect the MIME type of file bytes via Tika.
 
-        Useful when the Kafka event's contentType is missing or unreliable.
+        Useful when the Kafka event's contentType is missing or unreliable
+        (e.g. ``application/octet-stream``).
         """
         return await self._put_request(
             endpoint="/detect/stream",
@@ -158,48 +205,14 @@ class TikaExtractor:
     async def health_check(self) -> bool:
         """Return True if the Tika server is reachable."""
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{self.tika_url}/tika")
-                return resp.status_code == 200
+            resp = await self._client.get(f"{self.tika_url}/tika")
+            return resp.status_code == 200
         except httpx.HTTPError:
             return False
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
-
-    async def _extract_text(
-        self, file_bytes: bytes, content_type: str
-    ) -> Optional[str]:
-        """PUT /tika — returns plain text."""
-        return await self._put_request(
-            endpoint="/tika",
-            file_bytes=file_bytes,
-            content_type=content_type,
-            accept="text/plain",
-        )
-
-    async def _extract_metadata(
-        self, file_bytes: bytes, content_type: str
-    ) -> dict:
-        """PUT /meta — returns JSON metadata."""
-        raw = await self._put_request(
-            endpoint="/meta",
-            file_bytes=file_bytes,
-            content_type=content_type,
-            accept="application/json",
-        )
-        if raw is None:
-            return {}
-
-        # Tika /meta returns a JSON object when Accept: application/json
-        import json
-
-        try:
-            return json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("Failed to parse Tika metadata response")
-            return {}
 
     async def _put_request(
         self,
@@ -211,11 +224,14 @@ class TikaExtractor:
         """
         Send a PUT request to a Tika endpoint with retry logic.
 
+        The persistent ``self._client`` is reused so TCP connections are
+        pooled across successive calls.
+
         Args:
-            endpoint:     e.g. "/tika", "/meta", "/detect/stream"
+            endpoint:     e.g. "/rmeta/text", "/detect/stream"
             file_bytes:   Raw file content.
             content_type: MIME type header sent to Tika.
-            accept:       Accept header ("text/plain" or "application/json").
+            accept:       Accept header (``"text/plain"`` or ``"application/json"``).
 
         Returns:
             Response body as a string, or None on failure.
@@ -230,12 +246,11 @@ class TikaExtractor:
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.put(
-                        url, content=file_bytes, headers=headers
-                    )
-                    response.raise_for_status()
-                    return response.text
+                response = await self._client.put(
+                    url, content=file_bytes, headers=headers
+                )
+                response.raise_for_status()
+                return response.text
 
             except httpx.TimeoutException as exc:
                 last_error = exc

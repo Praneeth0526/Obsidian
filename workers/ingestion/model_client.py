@@ -9,19 +9,21 @@ Endpoints called:
     POST /embed/image  — multipart image   → single 384-dim float vector
 
 Design decisions:
+    - A single persistent ``httpx.AsyncClient`` is reused across all requests
+      so that TCP connections to the model-server are pooled.  This is
+      especially important for documents that produce many batches.
     - Batches text chunks in configurable groups (default 32) to balance
       throughput vs. model-server memory pressure.
     - Retries on transient errors (5xx, timeouts, connection errors) with
       exponential backoff. Does NOT retry on 4xx client errors.
     - All config (URL, timeout, batch size, retries) comes from environment
       variables so the worker is fully container-friendly.
-    - Uses httpx.AsyncClient for non-blocking I/O that fits the asyncio
-      Kafka consumer in main.py.
 
 Usage:
     client = ModelClient()                     # reads MODEL_SERVER_URL from env
-    vectors = await client.embed_texts(chunks) # list[ChunkResult] → list[list[float]]
+    vectors = await client.embed_texts(chunks) # list[str] → list[list[float]]
     vector  = await client.embed_image(img_bytes, "image/jpeg")
+    await client.close()                       # release connections on shutdown
 """
 
 import asyncio
@@ -60,6 +62,10 @@ class EmbeddingError(Exception):
 class ModelClient:
     """
     Async HTTP client for the shared model-server.
+
+    A single persistent ``httpx.AsyncClient`` is maintained for the lifetime
+    of this object.  Call ``await close()`` when done to release connections,
+    or use the client as an async context manager.
 
     Parameters:
         model_server_url: Base URL of the model-server
@@ -107,6 +113,25 @@ class ModelClient:
             if backoff_base is not None
             else os.environ.get("MODEL_SERVER_BACKOFF", _DEFAULT_BACKOFF)
         )
+
+        # Persistent client — reused for all requests to enable TCP connection
+        # pooling.  Without this, every embed call opens and closes a new
+        # connection, adding handshake latency proportional to batch count.
+        self._client = httpx.AsyncClient(timeout=self.timeout)
+
+    # ------------------------------------------------------------------
+    # Async context manager support
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        await self.close()
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client and release pooled connections."""
+        await self._client.aclose()
 
     # ------------------------------------------------------------------
     # Public API
@@ -176,7 +201,7 @@ class ModelClient:
         Args:
             image_bytes:  Raw image bytes (already resized/normalized by
                           image_handler.py before calling here).
-            content_type: MIME type of the image (e.g. ``"image/png"``).
+            content_type: MIME type of the image (e.g. ``"image/jpeg"``).
 
         Returns:
             A single float vector.
@@ -211,9 +236,8 @@ class ModelClient:
     async def health_check(self) -> bool:
         """Return True if the model-server's /health endpoint responds 200."""
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{self.base_url}/health")
-                return resp.status_code == 200
+            resp = await self._client.get(f"{self.base_url}/health")
+            return resp.status_code == 200
         except httpx.HTTPError:
             return False
 
@@ -249,7 +273,7 @@ class ModelClient:
         extra_log: Optional[dict] = None,
     ) -> httpx.Response:
         """
-        Send an HTTP request and retry on transient failures.
+        Send an HTTP request via the persistent client with retry on transients.
 
         Retry policy:
             - Retry on: 5xx responses, httpx.TimeoutException, httpx.ConnectError
@@ -274,17 +298,12 @@ class ModelClient:
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    if files:
-                        response = await client.request(
-                            method, url, files=files
-                        )
-                    else:
-                        response = await client.request(
-                            method, url, json=json
-                        )
-                    response.raise_for_status()
-                    return response
+                if files:
+                    response = await self._client.request(method, url, files=files)
+                else:
+                    response = await self._client.request(method, url, json=json)
+                response.raise_for_status()
+                return response
 
             except httpx.TimeoutException as exc:
                 last_error = exc
