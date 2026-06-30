@@ -23,6 +23,12 @@ spec:
           env:
             - name: GATEWAY_URL
               value: "http://go-gateway:8080"
+            # Download route: override MINIO_ENDPOINT with full http:// URL
+            # (ConfigMap has bare "minio:9000" without protocol)
+            - name: MINIO_ENDPOINT
+              value: "http://minio:9000"
+            - name: MINIO_REGION
+              value: "us-east-1"
           ports:
             - containerPort: 3000
           readinessProbe:

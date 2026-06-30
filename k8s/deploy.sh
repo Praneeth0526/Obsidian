@@ -36,8 +36,8 @@ fi
 # -----------------------------------------------------------------------------
 info "Starting Minikube..."
 minikube start \
-  --cpus=4 \
-  --memory=8192 \
+  --cpus=2 \
+  --memory=4096 \
   --disk-size=40g \
   --driver=docker 2>/dev/null || true
 

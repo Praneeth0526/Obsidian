@@ -89,11 +89,17 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # Route search through the Go Gateway (Stage 2 entry point per Flow.png)
+      # Route search through the Go Gateway
+      GATEWAY_URL: http://go-gateway:8080
       NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8080}
       OPENSEARCH_HOST: opensearch
       OPENSEARCH_PORT: 9200
       OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-hpe-search-docs}
+      # MinIO — for /api/download presigned URL generation
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin123}
+      MINIO_REGION: us-east-1
     depends_on:
       - go-gateway
     restart: unless-stopped

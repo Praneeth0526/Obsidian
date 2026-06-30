@@ -1,8 +1,27 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 
 const API_BASE = "";
+
+// ── Clipboard helper (works on HTTP too) ───────────────────────────────────
+function copyToClipboard(text) {
+  if (navigator?.clipboard?.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  // Fallback: create a temporary textarea
+  return new Promise((resolve, reject) => {
+    const el = document.createElement("textarea");
+    el.value = text;
+    el.setAttribute("readonly", "");
+    el.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0;";
+    document.body.appendChild(el);
+    el.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(el);
+    ok ? resolve() : reject(new Error("execCommand copy failed"));
+  });
+}
 
 const SUGGESTIONS = [
   "invoice pdf",
@@ -26,8 +45,7 @@ function formatDate(d) {
 
 function FileIcon({ ext }) {
   const extension = (ext || "").toLowerCase();
-  
-  // Document Files (PDF, DOC, DOCX, TXT)
+
   if (["pdf", "doc", "docx", "txt", "pages"].includes(extension)) {
     return (
       <svg className="doc-icon icon-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -39,8 +57,7 @@ function FileIcon({ ext }) {
       </svg>
     );
   }
-  
-  // Image Files
+
   if (["png", "jpg", "jpeg", "gif", "svg", "webp"].includes(extension)) {
     return (
       <svg className="image-icon icon-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -50,8 +67,7 @@ function FileIcon({ ext }) {
       </svg>
     );
   }
-  
-  // Spreadsheets
+
   if (["xls", "xlsx", "csv", "numbers"].includes(extension)) {
     return (
       <svg className="sheet-icon icon-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -63,8 +79,7 @@ function FileIcon({ ext }) {
       </svg>
     );
   }
-  
-  // Archive files
+
   if (["zip", "tar", "gz", "rar", "7z"].includes(extension)) {
     return (
       <svg className="zip-icon icon-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -76,8 +91,7 @@ function FileIcon({ ext }) {
       </svg>
     );
   }
-  
-  // Default Generic File Icon
+
   return (
     <svg className="generic-icon icon-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
@@ -86,11 +100,354 @@ function FileIcon({ ext }) {
   );
 }
 
+/* ── Copy Icon ── */
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
+/* ── Edit Icon ── */
+function EditIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+    </svg>
+  );
+}
+
+/* ── Download Icon ── */
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  );
+}
+
+/* ── Chevron Icon ── */
+function ChevronIcon({ open }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ transform: open ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.25s ease" }}
+    >
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
+}
+
+/* ── AI Summary Panel ── */
+function SummaryPanel({ results, query, intentText }) {
+  const [open, setOpen] = useState(true);
+
+  if (!results || results.length === 0) return null;
+
+  // Compute stats
+  const total = results.length;
+  const typeCounts = {};
+  results.forEach((r) => {
+    const ext = (r.extension || "unknown").toLowerCase();
+    typeCounts[ext] = (typeCounts[ext] || 0) + 1;
+  });
+
+  const dates = results
+    .map((r) => r.last_modified)
+    .filter(Boolean)
+    .map((d) => new Date(d).getTime())
+    .filter((t) => !isNaN(t));
+  const earliest = dates.length ? new Date(Math.min(...dates)) : null;
+  const latest = dates.length ? new Date(Math.max(...dates)) : null;
+
+  const dateRangeStr =
+    earliest && latest
+      ? earliest.getTime() === latest.getTime()
+        ? formatDate(earliest)
+        : `${formatDate(earliest)} – ${formatDate(latest)}`
+      : "—";
+
+  return (
+    <div className={`summary-panel ${open ? "summary-open" : "summary-closed"}`}>
+      <button className="summary-toggle" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        <span className="summary-title">
+          <svg className="summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          AI Summary
+        </span>
+        <span className="summary-chevron"><ChevronIcon open={open} /></span>
+      </button>
+
+      {open && (
+        <div className="summary-body">
+          {intentText && (
+            <p className="summary-intent">&ldquo;{intentText}&rdquo;</p>
+          )}
+          <div className="summary-stats">
+            <div className="stat-item">
+              <span className="stat-label">Total Results</span>
+              <span className="stat-value">{total}</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-label">Date Range</span>
+              <span className="stat-value stat-date">{dateRangeStr}</span>
+            </div>
+          </div>
+          <div className="summary-types">
+            <span className="stat-label">File Types</span>
+            <div className="type-pills">
+              {Object.entries(typeCounts).map(([ext, count]) => (
+                <span key={ext} className="type-pill">
+                  .{ext} <strong>{count}</strong>
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── User Query Bubble with Copy & Edit ── */
+function UserBubble({ text, onEdit }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await copyToClipboard(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      /* clipboard denied — silently ignore */
+    }
+  }, [text]);
+
+  const handleEdit = useCallback(() => {
+    onEdit(text);
+  }, [text, onEdit]);
+
+  return (
+    <div className="user-bubble-wrap">
+      <div className="bubble user-bubble">
+        <svg className="query-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+        </svg>
+        {text}
+      </div>
+      <div className="bubble-actions">
+        {/* Copy button */}
+        <div className="bubble-action-wrap">
+          <button
+            className="bubble-action-btn"
+            onClick={handleCopy}
+            aria-label="Copy query"
+            title="Copy query"
+          >
+            <CopyIcon />
+          </button>
+          {copied && <span className="tooltip-copied">Copied!</span>}
+        </div>
+        {/* Edit button */}
+        <button
+          className="bubble-action-btn"
+          onClick={handleEdit}
+          aria-label="Edit query"
+          title="Edit query"
+        >
+          <EditIcon />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Preview Icon ── */
+function PreviewIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+/* ── Preview Modal ── */
+function PreviewModal({ item, onClose }) {
+  const ext = (item?.extension || "").toLowerCase();
+  const isImage = ["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext);
+  const isPdf   = ext === "pdf";
+  // previewUrl → inline (no dl param) so <img> and <iframe> render in-browser
+  // downloadUrl → attachment (dl=1) so browser triggers Save As dialog
+  const baseUrl = item
+    ? `/api/download?bucket=${encodeURIComponent(item.bucket)}&key=${encodeURIComponent(item.object_name)}`
+    : "";
+  const previewUrl  = baseUrl;
+  const downloadUrl = baseUrl ? `${baseUrl}&dl=1` : "";
+  const fileName = item?.object_name?.split("/").pop() || item?.object_name || "";
+
+  // Close on backdrop click
+  const handleBackdrop = (e) => { if (e.target === e.currentTarget) onClose(); };
+
+  // Close on Escape
+  useEffect(() => {
+    const handler = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  if (!item) return null;
+
+  return (
+    <div className="modal-backdrop" onClick={handleBackdrop}>
+      <div className="modal-box">
+        {/* Header */}
+        <div className="modal-header">
+          <div className="modal-title-row">
+            <FileIcon ext={item.extension} />
+            <span className="modal-filename">{fileName}</span>
+          </div>
+          <div className="modal-actions">
+            <a
+              className="modal-download-btn"
+              href={downloadUrl}
+              download={fileName}
+              aria-label="Download"
+              title="Download"
+            >
+              <DownloadIcon />
+              <span>Download</span>
+            </a>
+            <button className="modal-close-btn" onClick={onClose} aria-label="Close">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="modal-body">
+          {isImage && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={previewUrl} alt={fileName} className="modal-image" />
+          )}
+          {isPdf && (
+            <iframe src={previewUrl} className="modal-iframe" title={fileName} />
+          )}
+          {!isImage && !isPdf && (
+            <div className="modal-meta">
+              <div className="modal-meta-icon"><FileIcon ext={item.extension} /></div>
+              <p className="modal-meta-name">{fileName}</p>
+              <div className="modal-meta-pills">
+                <span className="meta-pill bucket">{item.bucket}</span>
+                <span className="meta-pill size">{formatBytes(item.size_bytes)}</span>
+                <span className="meta-pill date">{formatDate(item.last_modified)}</span>
+                {item.extension && <span className="meta-pill ext">.{item.extension}</span>}
+              </div>
+              <p className="modal-meta-hint">Preview is not available for this file type.<br/>Use the Download button above.</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── File-type CSS class helper ── */
+function getTypeClass(ext) {
+  const e = (ext || "").toLowerCase();
+  if (e === "pdf") return "type-pdf";
+  if (["doc", "docx", "txt", "pages"].includes(e)) return "type-doc";
+  if (["xls", "xlsx", "csv", "numbers"].includes(e)) return "type-xls";
+  if (["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(e)) return "type-img";
+  if (["zip", "tar", "gz", "rar", "7z"].includes(e)) return "type-zip";
+  return "";
+}
+
+/* ── Result card with Preview + Download ── */
+function ResultCard({ item, onPreview }) {
+  const [downloading, setDownloading] = useState(false);
+  const typeClass = getTypeClass(item.extension);
+  const fileName = item.object_name.split("/").pop() || item.object_name;
+
+  const handleDownload = useCallback((e) => {
+    e.stopPropagation();
+    if (downloading) return;
+    setDownloading(true);
+    const params = new URLSearchParams({ bucket: item.bucket, key: item.object_name, dl: "1" });
+    const link = document.createElement("a");
+    link.href = `/api/download?${params.toString()}`;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => setDownloading(false), 1500);
+  }, [item, fileName, downloading]);
+
+  return (
+    <div className={`result-card ${typeClass}`} onClick={() => onPreview(item)}>
+      <div className="card-icon">
+        <FileIcon ext={item.extension} />
+      </div>
+      <div className="card-body">
+        <div className="card-name" title={item.object_name}>{fileName}</div>
+        <div className="card-meta">
+          <span className="meta-pill bucket">{item.bucket}</span>
+          <span className="meta-pill size">{formatBytes(item.size_bytes)}</span>
+          <span className="meta-pill date">{formatDate(item.last_modified)}</span>
+          {item.extension && <span className="meta-pill ext">.{item.extension}</span>}
+        </div>
+      </div>
+      <div className="card-action-group" onClick={(e) => e.stopPropagation()}>
+        <button
+          className="preview-btn"
+          onClick={(e) => { e.stopPropagation(); onPreview(item); }}
+          aria-label="Preview file"
+          title="Preview file"
+        >
+          <PreviewIcon />
+        </button>
+        <button
+          className={`download-btn ${downloading ? "downloading" : ""}`}
+          onClick={handleDownload}
+          aria-label="Download file"
+          title="Download file"
+          disabled={downloading}
+        >
+          {downloading ? (
+            <svg className="spin-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+            </svg>
+          ) : (
+            <DownloadIcon />
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Main Page ── */
 export default function Home() {
   const [query, setQuery] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [previewItem, setPreviewItem] = useState(null);
   const chatEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -102,7 +459,6 @@ export default function Home() {
     const trimmed = q.trim();
     if (!trimmed || loading) return;
 
-    // Add user query message
     setMessages((prev) => [...prev, { role: "user", text: trimmed }]);
     setQuery("");
     setLoading(true);
@@ -115,7 +471,12 @@ export default function Home() {
       const data = await res.json();
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", results: data.results || [], query: trimmed },
+        {
+          role: "assistant",
+          results: data.results || [],
+          query: trimmed,
+          intentText: data.intent_text || "",
+        },
       ]);
     } catch (err) {
       setMessages((prev) => [
@@ -132,17 +493,37 @@ export default function Home() {
     sendSearch(query);
   };
 
+  /* Edit handler: pre-fill input and focus */
+  const handleEditQuery = useCallback((text) => {
+    setQuery(text);
+    setTimeout(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(text.length, text.length);
+    }, 50);
+  }, []);
+
   const isFirstSearch = messages.length === 0;
+
+  /* Find the latest assistant message with results for summary panel */
+  const latestAssistant = [...messages].reverse().find(
+    (m) => m.role === "assistant" && m.results && m.results.length > 0
+  );
+
+  const handlePreview = useCallback((item) => setPreviewItem(item), []);
+  const handleClosePreview = useCallback(() => setPreviewItem(null), []);
 
   return (
     <div className="app">
+      {/* Preview modal */}
+      {previewItem && <PreviewModal item={previewItem} onClose={handleClosePreview} />}
+
       {/* Background mesh */}
       <div className="bg-mesh" />
 
       {/* Header */}
       <header className="header">
         <div className="logo" onClick={() => setMessages([])}>
-          <span className="logo-hpe">HPE</span>
+          <span className="logo-hpe">Object</span>
           <span className="logo-search">Search</span>
         </div>
         {!isFirstSearch && (
@@ -155,7 +536,7 @@ export default function Home() {
         {isFirstSearch && (
           <div className="hero">
             <div className="hero-logo">
-              <span className="hero-hpe">HPE</span>
+              <span className="hero-hpe">Object</span>
               <span className="hero-search">Search</span>
             </div>
             <p className="hero-sub">Search your object storage with natural language.</p>
@@ -169,22 +550,22 @@ export default function Home() {
           </div>
         )}
 
-        {/* Chat thread */}
+        {/* Google-style per-turn layout */}
         {!isFirstSearch && (
-          <div className="chat-thread">
+          <div className="chat-container">
             {messages.map((msg, i) => (
-              <div key={i} className={`message-row ${msg.role}`}>
-                {msg.role === "user" ? (
-                  <div className="bubble user-bubble">
-                    <svg className="query-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
-                    </svg>
-                    {msg.text}
-                  </div>
-                ) : (
-                  <div className="assistant-bubble">
+              msg.role === "user" ? (
+                /* ── Query row: full-width centered bubble ── */
+                <div key={i} className="query-turn">
+                  <UserBubble text={msg.text} onEdit={handleEditQuery} />
+                </div>
+              ) : (
+                /* ── Response row: left results + right summary ── */
+                <div key={i} className="response-turn">
+                  {/* Left: results */}
+                  <div className="response-main">
                     <div className="assistant-header">
-                      <span className="assistant-badge">HPE Search</span>
+                      <span className="assistant-badge">Object Search</span>
                       {msg.results && (
                         <span className="result-count">
                           {msg.results.length} result{msg.results.length !== 1 ? "s" : ""} for &ldquo;{msg.query}&rdquo;
@@ -210,32 +591,32 @@ export default function Home() {
                     {msg.results && msg.results.length > 0 && (
                       <div className="result-grid">
                         {msg.results.map((item, j) => (
-                          <div key={j} className="result-card">
-                            <div className="card-icon">
-                              <FileIcon ext={item.extension} />
-                            </div>
-                            <div className="card-body">
-                              <div className="card-name">{item.object_name}</div>
-                              <div className="card-meta">
-                                <span className="meta-pill bucket">{item.bucket}</span>
-                                <span className="meta-pill size">{formatBytes(item.size_bytes)}</span>
-                                <span className="meta-pill date">{formatDate(item.last_modified)}</span>
-                                {item.extension && <span className="meta-pill ext">.{item.extension}</span>}
-                              </div>
-                            </div>
-                          </div>
+                          <ResultCard key={j} item={item} onPreview={handlePreview} />
                         ))}
                       </div>
                     )}
                   </div>
-                )}
-              </div>
+
+                  {/* Right: per-turn AI Summary */}
+                  {msg.results && msg.results.length > 0 && (
+                    <aside className="response-sidebar">
+                      <SummaryPanel
+                        results={msg.results}
+                        query={msg.query}
+                        intentText={msg.intentText}
+                      />
+                    </aside>
+                  )}
+                </div>
+              )
             ))}
 
             {loading && (
-              <div className="message-row assistant">
-                <div className="assistant-bubble typing">
-                  <span /><span /><span />
+              <div className="response-turn">
+                <div className="response-main">
+                  <div className="assistant-bubble typing">
+                    <span /><span /><span />
+                  </div>
                 </div>
               </div>
             )}
@@ -264,11 +645,12 @@ export default function Home() {
             />
             {query && (
               <button type="button" className="clear-btn" onClick={() => setQuery("")}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{width: 14, height: 14}}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: 14, height: 14 }}>
                   <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
                 </svg>
               </button>
             )}
+            {/* Mic / Send button (right) */}
             <button type="submit" className="send-btn" disabled={loading || !query.trim()}>
               <svg viewBox="0 0 24 24" fill="currentColor">
                 <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
