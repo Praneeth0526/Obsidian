@@ -13,7 +13,7 @@ Produces:
 
 Prerequisites:
     - Docker services running:  docker compose up -d
-      (MinIO on 9000, Tika on 9998, Model Server on 8001)
+      (MinIO on 9000, Tika on 9998, Model Server on 8000)
     - Test-only deps installed: pip install reportlab python-docx python-pptx
 
 Usage:
@@ -78,7 +78,7 @@ MINIO_SECURE = os.environ.get("MINIO_SECURE", "false").lower() == "true"
 MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "uploads")
 
 TIKA_URL = os.environ.get("TIKA_URL", "http://localhost:9998")
-MODEL_SERVER_URL = os.environ.get("MODEL_SERVER_URL", "http://localhost:8001")
+MODEL_SERVER_URL = os.environ.get("MODEL_SERVER_URL", "http://localhost:8000")
 
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 50

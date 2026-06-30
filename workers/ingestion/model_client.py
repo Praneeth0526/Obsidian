@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # Defaults (all overridable via environment variables)
 # ---------------------------------------------------------------------------
 
-_DEFAULT_URL        = "http://localhost:8001"
+_DEFAULT_URL        = "http://localhost:8000"
 _DEFAULT_TIMEOUT    = 30.0   # seconds per request
 _DEFAULT_BATCH_SIZE = 32     # text chunks per /embed/text call
 _DEFAULT_MAX_RETRY  = 3      # total attempts (1 initial + 2 retries)

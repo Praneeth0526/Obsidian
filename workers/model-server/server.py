@@ -27,6 +27,7 @@ from typing import Annotated
 
 import structlog
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from image_embedder import ImageEmbedder
@@ -227,7 +228,7 @@ async def embed_image(
 
     log.info("embed_image.request", content_type=file.content_type, bytes=len(image_bytes))
     try:
-        vector = _image_embedder.embed(image_bytes)
+        vector = await run_in_threadpool(_image_embedder.embed, image_bytes)
     except ValueError as exc:
         log.warning("embed_image.validation_error", error=str(exc))
         raise HTTPException(
