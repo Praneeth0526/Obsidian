@@ -108,6 +108,14 @@ class ChunkDocument:
     language:  str = "en"
     tags:      List[str] = field(default_factory=list)
 
+    # Document-level metadata (populated from Tika extraction)
+    # These fields enable rich OpenSearch filtering — e.g. "PDFs by author X
+    # created after 2024" — without forcing callers to pack everything into tags.
+    author:         str = ""   # dc:creator / Author
+    title:          str = ""   # dc:title
+    page_count:     int = 0    # meta:page-count (0 = unknown / not applicable)
+    doc_created_at: str = ""   # dcterms:created, ISO-8601 (empty = unknown)
+
     # Operational
     indexed_at:        str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     ingestion_status:  str = "ok"    # ok | error

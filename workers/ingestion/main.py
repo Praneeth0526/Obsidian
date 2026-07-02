@@ -310,33 +310,54 @@ class IngestionWorker:
         vectors = await self.model_client.embed_texts([c.text for c in chunks])
 
         # Extract useful fields from Tika metadata for richer search filtering.
-        meta          = tika_result.metadata
-        doc_language  = meta.get("Content-Language") or meta.get("language") or "en"
-        doc_author    = meta.get("dc:creator") or meta.get("Author") or ""
-        doc_title     = meta.get("dc:title") or meta.get("title") or filename
+        # Each field is stored both as a dedicated ChunkDocument attribute (for
+        # structured OpenSearch filtering) and, where useful, as a searchable
+        # tag (for BM25 keyword matching).
+        meta           = tika_result.metadata
+        doc_language   = meta.get("Content-Language") or meta.get("language") or "en"
+        doc_author     = meta.get("dc:creator") or meta.get("Author") or ""
+        doc_title      = meta.get("dc:title") or meta.get("title") or filename
+        doc_created_at = meta.get("dcterms:created") or meta.get("Creation-Date") or ""
+
+        # meta:page-count is a string in Tika’s output; coerce to int.
+        raw_page_count = meta.get("meta:page-count") or meta.get("xmpTPg:NPages") or "0"
+        try:
+            doc_page_count = int(raw_page_count)
+        except (TypeError, ValueError):
+            doc_page_count = 0
+
+        # Build supplementary BM25 tags so keyword search can surface documents
+        # by author / title even when those terms aren’t in the body text.
         doc_tags: List[str] = []
         if doc_author:
             doc_tags.append(f"author:{doc_author}")
         if doc_title and doc_title != filename:
             doc_tags.append(f"title:{doc_title}")
+        if doc_page_count:
+            doc_tags.append(f"pages:{doc_page_count}")
 
         docs: List[ChunkDocument] = []
         for chunk, vector in zip(chunks, vectors):
             docs.append(ChunkDocument(
-                object_key   = object_key,
-                bucket       = bucket,
-                filename     = filename,
-                extension    = extension,
-                mime_type    = content_type,
-                download_url = download_url,
-                size_bytes   = size_bytes,
-                uploaded_at  = uploaded_at,
-                chunk_index  = chunk.chunk_index,
-                chunk_total  = len(chunks),
-                chunk_text   = chunk.text,
-                embedding    = vector,
-                language     = doc_language,
-                tags         = doc_tags,
+                object_key     = object_key,
+                bucket         = bucket,
+                filename       = filename,
+                extension      = extension,
+                mime_type      = content_type,
+                download_url   = download_url,
+                size_bytes     = size_bytes,
+                uploaded_at    = uploaded_at,
+                chunk_index    = chunk.chunk_index,
+                chunk_total    = len(chunks),
+                chunk_text     = chunk.text,
+                embedding      = vector,
+                language       = doc_language,
+                tags           = doc_tags,
+                # Document-level metadata fields (Feature 2)
+                author         = doc_author,
+                title          = doc_title,
+                page_count     = doc_page_count,
+                doc_created_at = doc_created_at,
             ))
 
         result = await asyncio.to_thread(self.os_client.bulk_upsert, docs)
