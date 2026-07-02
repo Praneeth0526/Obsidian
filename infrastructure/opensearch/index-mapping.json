@@ -100,6 +100,31 @@
         "type": "keyword"
       },
 
+      "author": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "keyword": { "type": "keyword", "ignore_above": 512 }
+        }
+      },
+
+      "title": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "keyword": { "type": "keyword", "ignore_above": 512 }
+        }
+      },
+
+      "page_count": {
+        "type": "integer"
+      },
+
+      "doc_created_at": {
+        "type": "date",
+        "format": "strict_date_optional_time||epoch_millis"
+      },
+
       "embedding": {
         "type": "knn_vector",
         "dimension": 384,
