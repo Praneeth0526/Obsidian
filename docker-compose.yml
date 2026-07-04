@@ -250,8 +250,8 @@ services:
       test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
       interval: 15s
       timeout: 10s
-      retries: 5
-      start_period: 60s
+      retries: 10
+      start_period: 120s
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
@@ -472,6 +472,7 @@ services:
       - "3000:3000"
     environment:
       NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8080}
+      GATEWAY_URL: http://go-gateway:8080
       OPENSEARCH_HOST: opensearch
       OPENSEARCH_PORT: 9200
       OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-hpe-search-docs}
