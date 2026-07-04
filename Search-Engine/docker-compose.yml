@@ -46,6 +46,9 @@ services:
       OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-hpe-search-docs}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SEARCH_KNN_K: ${SEARCH_KNN_K:-50}
+      SEARCH_KNN_BOOST: ${SEARCH_KNN_BOOST:-0.6}
+      SEARCH_BM25_BOOST: ${SEARCH_BM25_BOOST:-0.4}
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
     ports:

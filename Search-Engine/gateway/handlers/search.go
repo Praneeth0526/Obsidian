@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/hpe/search-engine/gateway/cache"
 	"github.com/hpe/search-engine/gateway/grpcclient"
@@ -48,9 +49,11 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[*] Search request: q=%q limit=%d", query, limit)
 
+	startTime := time.Now()
+
 	// ── Step 1: Redis cache check ─────────────────────────────────────────────
 	if cached, ok := h.cache.Get(query); ok {
-		log.Printf("[*] Cache HIT for %q", query)
+		log.Printf("[*] Cache HIT for %q (took %v)", query, time.Since(startTime))
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Cache", "HIT")
 		w.WriteHeader(http.StatusOK)
@@ -76,8 +79,8 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 	h.cache.Set(query, result)
 	// ─────────────────────────────────────────────────────────────────────────
 
-	log.Printf("[+] Returning %d results for %q (intent: %q)",
-		len(result.Results), query, result.IntentText)
+	log.Printf("[+] Returning %d results for %q (intent: %q) (took %v)",
+		len(result.Results), query, result.IntentText, time.Since(startTime))
 
 	w.Header().Set("X-Cache", "MISS")
 	writeJSON(w, http.StatusOK, result)

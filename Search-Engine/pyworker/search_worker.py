@@ -4,6 +4,7 @@ Handles query parsing, vectorization, semantic + keyword search, and ranking
 """
 import os
 import sys
+import time
 from concurrent import futures
 from typing import Dict, List, Tuple
 
@@ -54,16 +55,25 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
         limit = request.limit if request.limit > 0 else DEFAULT_LIMIT
 
         print(f"[*] Processing search query: {query}")
+        t0 = time.time()
 
         parse_result = self.query_chain.invoke(query)
+        t_parse = time.time() - t0
+
         intent_text = parse_result["intent_text"]
         keywords = parse_result["keywords"]
         filters = parse_result["filters"]
 
         # Encode the intent text into a vector embedding for semantic search
+        t1 = time.time()
         query_vector = self.embedding_service.encode(intent_text)
+        t_embed = time.time() - t1
 
+        t2 = time.time()
         results = self._hybrid_search(query, keywords, filters, query_vector, intent_text, limit)
+        t_search = time.time() - t2
+        
+        print(f"[METRICS] Parse: {t_parse:.3f}s | Embed: {t_embed:.3f}s | Search: {t_search:.3f}s | Total: {(time.time() - t0):.3f}s")
 
         response_results = [
             search_pb2.SearchResult(
@@ -368,7 +378,7 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
             day  = int(day_str)
             year = int(year_str)
         except ValueError:
-            return {}
+            return {"match_none": {}}
 
         # Use timezone-aware UTC datetimes so the range matches the +00:00
         # timestamps stored by the ingestion worker.
@@ -386,7 +396,7 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
                 }
             }
         except ValueError:
-            return {}
+            return {"match_none": {}}
 
     def _size_filter_to_range(self, filter_str: str) -> Dict[str, object]:
         """Convert size filter to OpenSearch range clause."""

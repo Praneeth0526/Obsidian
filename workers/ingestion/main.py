@@ -47,7 +47,8 @@ class IngestionWorker:
         self.consumer = Consumer({
             'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS,
             'group.id': KAFKA_GROUP_ID,
-            'auto.offset.reset': 'earliest'
+            'auto.offset.reset': 'earliest',
+            'enable.auto.commit': False
         })
         self.consumer.subscribe([KAFKA_TOPIC])
 
@@ -101,8 +102,8 @@ class IngestionWorker:
 
             try:
                 # 1. Download file from MinIO
-                response   = self.minio_client.get_object(bucket, key)
-                file_bytes = response.read()
+                response   = await asyncio.to_thread(self.minio_client.get_object, bucket, key)
+                file_bytes = await asyncio.to_thread(response.read)
                 response.close()
                 response.release_conn()
 
@@ -187,6 +188,7 @@ class IngestionWorker:
             except Exception as e:
                 logger.error(f"Error processing {key}: {e}", exc_info=True)
                 # In a production system, publish to the DLQ here
+                raise e
 
     def _debug_dump(self, bucket: str, key: str, data: Dict[str, Any]) -> None:
         """Optionally write processed output to output_dims/ for local debugging."""
@@ -215,6 +217,7 @@ class IngestionWorker:
                 try:
                     event_data = json.loads(msg.value().decode('utf-8'))
                     await self.process_event(event_data)
+                    await asyncio.to_thread(self.consumer.commit, msg)
                 except json.JSONDecodeError:
                     logger.error("Failed to decode Kafka message as JSON")
                 except Exception as e:
