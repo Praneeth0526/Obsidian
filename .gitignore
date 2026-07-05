@@ -26,3 +26,6 @@ graphify-out
 # Ingestion outputs
 output_dims/
 models/
+
+# Docker local overrides
+docker-compose.override.yml
