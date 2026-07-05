@@ -252,11 +252,38 @@ class IngestionWorker:
         # Build a searchable text description so BM25 can surface images.
         # Without this, images have no keyword representation and are invisible
         # to the BM25 side of the hybrid search.
-        bm25_text = (
-            f"Image: {filename} "
-            f"({image_result.orig_width}x{image_result.orig_height} pixels, "
-            f"{content_type})"
-        )
+        #
+        # We enrich the text with any EXIF metadata that was extracted by
+        # ImageHandler so users can keyword-search by camera model, capture
+        # date, GPS location, etc. (e.g. "Canon photos", "March 2024").
+        exif = image_result.exif_metadata
+        bm25_parts = [
+            f"Image: {filename}",
+            f"({image_result.orig_width}x{image_result.orig_height} pixels, {content_type})",
+        ]
+        camera_parts = []
+        if exif.get("camera_make"):
+            camera_parts.append(exif["camera_make"])
+        if exif.get("camera_model"):
+            camera_parts.append(exif["camera_model"])
+        if camera_parts:
+            bm25_parts.append(f"Camera: {' '.join(camera_parts)}.")
+        capture_date = exif.get("capture_date") or exif.get("datetime")
+        if capture_date:
+            bm25_parts.append(f"Date: {capture_date}.")
+        if exif.get("gps_lat") is not None and exif.get("gps_lon") is not None:
+            lat = exif["gps_lat"]
+            lon = exif["gps_lon"]
+            lat_dir = "N" if lat >= 0 else "S"
+            lon_dir = "E" if lon >= 0 else "W"
+            bm25_parts.append(
+                f"Location: {abs(lat):.4f}°{lat_dir}, {abs(lon):.4f}°{lon_dir}."
+            )
+        if exif.get("user_comment"):
+            comment = exif["user_comment"].strip()
+            if comment:
+                bm25_parts.append(f"Comment: {comment}.")
+        bm25_text = " ".join(bm25_parts)
 
         doc = ChunkDocument(
             object_key   = object_key,
