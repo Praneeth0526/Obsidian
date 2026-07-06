@@ -241,7 +241,7 @@ services:
       - discovery.type=single-node
       - DISABLE_INSTALL_DEMO_CONFIG=true
       - DISABLE_SECURITY_PLUGIN=true
-      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
       - plugins.ml_commons.only_run_on_ml_node=false
       - plugins.ml_commons.allow_registering_model_via_url=true
     volumes:
@@ -250,8 +250,8 @@ services:
       test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
       interval: 15s
       timeout: 10s
-      retries: 10
-      start_period: 180s   # ML plugins (NeuralSearch, MLCommons) take 90-120s to load
+      retries: 20
+      start_period: 300s   # ML plugins (NeuralSearch, MLCommons) take 90-120s to load
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
@@ -269,6 +269,28 @@ services:
     command:
       - |
         echo "=== OpenSearch Init ==="
+        echo "Creating hybrid search pipeline..."
+        curl -sf -X PUT "http://opensearch:9200/_search/pipeline/hybrid-search-pipeline" \
+          -H 'Content-Type: application/json' \
+          -d '{
+            "description": "Normalize and combine kNN and BM25 scores",
+            "phase_results_processors": [
+              {
+                "normalization-processor": {
+                  "normalization": {
+                    "technique": "min_max"
+                  },
+                  "combination": {
+                    "technique": "arithmetic_mean",
+                    "parameters": {
+                      "weights": [0.6, 0.4]
+                    }
+                  }
+                }
+              }
+            ]
+          }' && echo "Pipeline created." || echo "Failed to create pipeline."
+          
         echo "Creating hpe-search-docs index..."
         curl -sf -X PUT http://opensearch:9200/hpe-search-docs \
           -H 'Content-Type: application/json' \
@@ -476,6 +498,7 @@ services:
       OPENSEARCH_HOST: opensearch
       OPENSEARCH_PORT: 9200
       OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-hpe-search-docs}
+      MINIO_ENDPOINT: http://minio:9000
     depends_on:
       - go-gateway
     restart: unless-stopped
