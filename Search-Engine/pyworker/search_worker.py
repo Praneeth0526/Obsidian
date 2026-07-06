@@ -33,6 +33,8 @@ import proto.search_pb2 as search_pb2
 import proto.search_pb2_grpc as search_pb2_grpc
 
 
+
+
 class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
     """gRPC servicer for hybrid search."""
 
@@ -45,7 +47,98 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
             verify_certs=False,
         )
         self.query_chain = RunnableLambda(self._parse_query)
+        print("[+] Loading T5 summarization model...")
+        try:
+            from transformers import pipeline
+            self.summarizer = pipeline("text2text-generation", model="google/flan-t5-small", device="cpu")
+        except Exception as e:
+            print(f"[!] Failed to load summarizer: {e}")
+            self.summarizer = None
+            
+        print("[+] Loading Cross-Encoder reranker...")
+        try:
+            from sentence_transformers import CrossEncoder
+            self.reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", device="cpu")
+        except Exception as e:
+            print(f"[!] Failed to load reranker: {e}")
+            self.reranker = None
+            
         print("[+] Search Worker Servicer initialized")
+
+    def _summarize_text(self, text: str) -> str:
+        if not text:
+            return ""
+        if not self.summarizer:
+            return text[:200].strip()
+        
+        try:
+            prompt = f"Explain the following excerpt in clear, simple terms. Focus on definitions and legal terminology if present. Excerpt: {text[:1000]}"
+            result = self.summarizer(prompt, max_length=80, min_length=20, do_sample=False)
+            return result[0]['generated_text']
+        except Exception as e:
+            print(f"[!] Summarization failed: {e}")
+            return text[:200].strip()
+
+    def _truncate_text(self, text: str, max_tokens: int = 256) -> str:
+        """Truncate text to max_tokens using the reranker's tokenizer to avoid mid-token cuts."""
+        if not self.reranker or not getattr(self.reranker, "tokenizer", None) or not text:
+            return text[:1000]
+        try:
+            tokens = self.reranker.tokenizer.encode(text, max_length=max_tokens, truncation=True)
+            return self.reranker.tokenizer.decode(tokens, skip_special_tokens=True)
+        except Exception:
+            return text[:1000]
+
+    def _rerank_results(self, query: str, candidates: List[Dict], limit: int) -> Tuple[List[Dict], float, float]:
+        """Rerank candidates using cross-encoder ms-marco-MiniLM-L-6-v2."""
+        use_reranker = os.getenv("USE_RERANKER", "true").lower() == "true"
+        t_batch = 0.0
+        t_infer = 0.0
+        
+        if not use_reranker or not self.reranker or not candidates or not query.strip():
+            for c in candidates:
+                c["rerank_score"] = c.get("combined_score", 0.0)
+            return candidates[:limit], t_batch, t_infer
+
+        # Fast-path bypass
+        fast_path_threshold = float(os.getenv("RERANK_FAST_PATH_THRESHOLD", "0.95"))
+        fast_path_gap = float(os.getenv("RERANK_FAST_PATH_GAP", "0.2"))
+
+        if len(candidates) >= 1:
+            top1_score = candidates[0].get("combined_score", 0.0)
+            if top1_score >= fast_path_threshold:
+                gap = top1_score - (candidates[1].get("combined_score", 0.0) if len(candidates) > 1 else 0.0)
+                if gap >= fast_path_gap:
+                    print(f"[*] Rerank fast-path triggered (Top1: {top1_score:.3f}, Gap: {gap:.3f}). Skipping.")
+                    for c in candidates:
+                        c["rerank_score"] = c.get("combined_score", 0.0)
+                    return candidates[:limit], t_batch, t_infer
+
+        try:
+            t_batch_start = time.time()
+            pairs = []
+            for c in candidates:
+                doc_text = self._truncate_text(c.get("chunk_text", "") or c.get("snippet", "") or c.get("object_name", ""))
+                pairs.append((query, doc_text))
+            t_batch = time.time() - t_batch_start
+            
+            t_infer_start = time.time()
+            scores = self.reranker.predict(pairs)
+            t_infer = time.time() - t_infer_start
+            
+            for i, c in enumerate(candidates):
+                c["rerank_score"] = float(scores[i])
+            
+            candidates.sort(key=lambda x: x["rerank_score"], reverse=True)
+            
+            print(f"[*] Reranked {len(candidates)} candidates in {(t_batch+t_infer)*1000:.2f}ms")
+            
+            return candidates[:limit], t_batch, t_infer
+        except Exception as e:
+            print(f"[!] Reranker failed: {e}")
+            for c in candidates:
+                c["rerank_score"] = c.get("combined_score", 0.0)
+            return candidates[:limit], t_batch, t_infer
 
     def ProcessQuery(self, request, context):
         """
@@ -70,10 +163,16 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
         t_embed = time.time() - t1
 
         t2 = time.time()
-        results = self._hybrid_search(query, keywords, filters, query_vector, intent_text, limit)
+        # Fetch more candidates from OpenSearch to provide a larger pool for the reranker
+        pool_size = int(os.getenv("RERANK_POOL_SIZE", "15"))
+        results = self._hybrid_search(query, keywords, filters, query_vector, intent_text, max(limit, pool_size))
         t_search = time.time() - t2
         
-        print(f"[METRICS] Parse: {t_parse:.3f}s | Embed: {t_embed:.3f}s | Search: {t_search:.3f}s | Total: {(time.time() - t0):.3f}s")
+        t3 = time.time()
+        results, t_batch, t_infer = self._rerank_results(query, results, limit)
+        t_rerank = time.time() - t3
+        
+        print(f"[METRICS] Parse: {t_parse:.3f}s | Embed: {t_embed:.3f}s | Search: {t_search:.3f}s | Rerank Batch: {t_batch:.3f}s | Rerank Infer: {t_infer:.3f}s | Total: {(time.time() - t0):.3f}s")
 
         response_results = [
             search_pb2.SearchResult(
@@ -87,6 +186,8 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
                 semantic_score=item.get("semantic_score", 0.0),
                 keyword_score=item.get("keyword_score", 0.0),
                 combined_score=item.get("combined_score", 0.0),
+                rerank_score=item.get("rerank_score", 0.0),
+                snippet=item.get("snippet", ""),
                 highlights=item.get("highlights", {}),
             )
             for item in results
@@ -125,119 +226,112 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
 
         filter_clauses = self._build_filter_clauses(filters)
         query_text = " ".join(keywords)
-
-        # ── kNN semantic search ──────────────────────────────────────────────
-        knn_hits: Dict[str, Dict] = {}
         use_knn = bool(query_vector) and bool(intent_text.strip())
+
+        queries = []
+        
+        # 1. kNN query component
         if use_knn:
-            knn_body = {
-                "size": knn_k,
-                "query": {
-                    "knn": {
-                        "embedding": {
-                            "vector": query_vector,
-                            "k": knn_k,
-                        }
+            queries.append({
+                "knn": {
+                    "embedding": {
+                        "vector": query_vector,
+                        "k": knn_k,
                     }
-                },
-                "_source": True,
-            }
-            if filter_clauses:
-                knn_body["post_filter"] = {"bool": {"filter": filter_clauses}}
-            try:
-                resp = self.opensearch.search(index=OPENSEARCH_INDEX, body=knn_body)
-                for hit in resp.get("hits", {}).get("hits", []):
-                    doc_id = hit["_id"]
-                    knn_hits[doc_id] = {
-                        "hit": hit,
-                        "knn_score": float(hit.get("_score") or 0.0),
-                    }
-            except Exception as exc:
-                print(f"[!] kNN search failed: {exc}")
-
-        # ── BM25 keyword search (collapsed per file) ─────────────────────────
-        # We collapse on filename.keyword so each unique file appears once,
-        # regardless of how many chunks it has — a single large PDF won't
-        # flood the results and push smaller files off the list.
-        bm25_hits: Dict[str, Dict] = {}
+                }
+            })
+            
+        # 2. BM25 query component
         if query_text:
-            must_clause = [{
-                "multi_match": {
-                    "query": query_text,
-                    "fields": ["filename^3", "object_key^2", "chunk_text",
-                               "extension", "bucket", "mime_type"],
+            queries.append({
+                "bool": {
+                    "must": [
+                        {
+                            "multi_match": {
+                                "query": query_text,
+                                "fields": ["filename^3", "object_key^2", "chunk_text",
+                                           "extension", "bucket", "mime_type"],
+                                "fuzziness": "AUTO",
+                                "prefix_length": 2,
+                            }
+                        }
+                    ],
+                    "filter": filter_clauses
                 }
-            }]
+            })
         else:
-            must_clause = [{"match_all": {}}]
-        bm25_body = {
-            "size": max(limit * 2, 50),
-            "query": {"bool": {"must": must_clause, "filter": filter_clauses}},
-            "collapse": {"field": "filename.keyword"},  # one hit per unique file
-        }
-        try:
-            resp = self.opensearch.search(index=OPENSEARCH_INDEX, body=bm25_body)
-            for hit in resp.get("hits", {}).get("hits", []):
-                doc_id = hit["_id"]
-                bm25_hits[doc_id] = {
-                    "hit": hit,
-                    "bm25_score": float(hit.get("_score") or 0.0),
+            # Filter-only fallback
+            queries.append({
+                "bool": {
+                    "must": [{"match_all": {}}],
+                    "filter": filter_clauses
                 }
-        except Exception as exc:
-            print(f"[!] BM25 search failed: {exc}")
-
-        # ── Normalise scores ─────────────────────────────────────────────────
-        def _normalize(scores: List[float]) -> List[float]:
-            if not scores: return scores
-            max_s = max(scores) or 1.0
-            return [s / max_s for s in scores]
-
-        knn_ids   = list(knn_hits.keys())
-        bm25_ids  = list(bm25_hits.keys())
-        knn_norms  = _normalize([knn_hits[i]["knn_score"]  for i in knn_ids])
-        bm25_norms = _normalize([bm25_hits[i]["bm25_score"] for i in bm25_ids])
-        knn_norm_map  = dict(zip(knn_ids,  knn_norms))
-        bm25_norm_map = dict(zip(bm25_ids, bm25_norms))
-
-        # ── Merge and rank ───────────────────────────────────────────────────
-        all_ids = set(knn_ids) | set(bm25_ids)
-        merged: List[Dict] = []
-        for doc_id in all_ids:
-            knn_entry  = knn_hits.get(doc_id,  {})
-            bm25_entry = bm25_hits.get(doc_id, {})
-            hit = knn_entry.get("hit") or bm25_entry.get("hit")
-            knn_s  = knn_norm_map.get(doc_id,  0.0)
-            bm25_s = bm25_norm_map.get(doc_id, 0.0)
-            combined = knn_boost * knn_s + bm25_boost * bm25_s
-            source = hit.get("_source", {})
-            merged.append({
-                "id": doc_id,
-                "object_key": source.get("object_key", doc_id),
-                "semantic_score": round(knn_s,  4),
-                "keyword_score":  round(bm25_s, 4),
-                "combined_score": round(combined, 4),
-                "object_name": source.get("filename", source.get("object_key", "")),
-                "bucket":       source.get("bucket", ""),
-                "size_bytes":   int(source.get("size_bytes", 0) or 0),
-                "content_type": source.get("mime_type", ""),
-                "extension":    source.get("extension", ""),
-                "last_modified": source.get("uploaded_at", ""),
-                "highlights":   {},
             })
 
+        # Assemble the final query
+        if use_knn and len(queries) > 1:
+            body = {
+                "size": max(limit * 2, 50),
+                "query": {
+                    "hybrid": {
+                        "queries": queries
+                    }
+                },
+                "collapse": {"field": "filename.keyword"},
+                "_source": True
+            }
+            search_params = {"search_pipeline": "hybrid-search-pipeline"}
+        else:
+            body = {
+                "size": max(limit * 2, 50),
+                "query": queries[-1], # The bool query
+                "collapse": {"field": "filename.keyword"},
+                "_source": True
+            }
+            search_params = {}
+
+        merged: List[Dict] = []
+        try:
+            resp = self.opensearch.search(
+                index=OPENSEARCH_INDEX, 
+                body=body,
+                **search_params
+            )
+            for hit in resp.get("hits", {}).get("hits", []):
+                doc_id = hit["_id"]
+                score = float(hit.get("_score") or 0.0)
+                source = hit.get("_source", {})
+                
+                merged.append({
+                    "id": doc_id,
+                    "object_key": source.get("object_key", doc_id),
+                    "semantic_score": score if use_knn else 0.0,
+                    "keyword_score": score if not use_knn else 0.0,
+                    "combined_score": round(score, 4),
+                    "object_name": source.get("filename", source.get("object_key", "")),
+                    "bucket":       source.get("bucket", ""),
+                    "size_bytes":   int(source.get("size_bytes", 0) or 0),
+                    "content_type": source.get("mime_type", ""),
+                    "extension":    source.get("extension", ""),
+                    "last_modified": source.get("uploaded_at", ""),
+                    "snippet":      self._summarize_text(source.get("chunk_text", "") or ""),
+                    "chunk_text":   source.get("chunk_text", "") or "",
+                    "highlights":   {},
+                })
+        except Exception as exc:
+            print(f"[!] Hybrid search failed: {exc}")
+
         # Sort by combined score DESC, then by filename ASC as a stable tiebreaker
-        # so equal-scored files (e.g. pure filter queries returning 0.4 each) all surface.
         merged.sort(key=lambda x: (-x["combined_score"], x.get("object_name", "")))
 
         # When query has intent text, filter out irrelevant matches below threshold.
-        # When filter-only (no intent), show all matching docs.
+        # With min_max + arithmetic_mean, maximum score is 1.0, and 0.45 threshold is reasonable.
         if intent_text.strip():
-            merged = [item for item in merged if item["combined_score"] >= 0.55]
+            merged = [item for item in merged if item["combined_score"] >= 0.45]
 
         seen_files: set = set()
         deduplicated: List[Dict] = []
         for item in merged:
-            # Use filename as the dedup key so each unique file appears once
             file_key = item.get("object_name") or item.get("object_key", item["id"])
             if file_key not in seen_files:
                 seen_files.add(file_key)
@@ -343,6 +437,21 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
                     clauses.append({"term": {"extension": "pdf"}})
                 elif file_type == "document":
                     clauses.append({"prefix": {"mime_type": "application/"}})
+                elif file_type == "presentation":
+                    clauses.append({"bool": {"should": [
+                        {"term": {"extension": "ppt"}},
+                        {"term": {"extension": "pptx"}},
+                        {"prefix": {"mime_type": "application/vnd.ms-powerpoint"}}
+                    ]}})
+                elif file_type == "spreadsheet":
+                    clauses.append({"bool": {"should": [
+                        {"term": {"extension": "xls"}},
+                        {"term": {"extension": "xlsx"}},
+                        {"term": {"extension": "csv"}},
+                        {"prefix": {"mime_type": "application/vnd.ms-excel"}}
+                    ]}})
+                elif file_type == "image":
+                    clauses.append({"prefix": {"mime_type": "image/"}})
                 else:
                     clauses.append({"prefix": {"mime_type": file_type}})
             elif filter_str.startswith("size:"):

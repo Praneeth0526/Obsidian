@@ -26,6 +26,29 @@ spec:
           args:
             - |
               echo "=== OpenSearch Init ==="
+              echo "Creating hybrid search pipeline..."
+              curl -sf -X PUT "http://opensearch:9200/_search/pipeline/hybrid-search-pipeline" \
+                -H 'Content-Type: application/json' \
+                -d '{
+                  "description": "Normalize and combine kNN and BM25 scores",
+                  "phase_results_processors": [
+                    {
+                      "normalization-processor": {
+                        "normalization": {
+                          "technique": "min_max"
+                        },
+                        "combination": {
+                          "technique": "arithmetic_mean",
+                          "parameters": {
+                            "weights": [0.6, 0.4]
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }' && echo "Pipeline created." || echo "Failed to create pipeline."
+              
+              echo "Creating index with mapping..."
               curl -sf -X PUT http://opensearch:9200/hpe-search-docs \
                 -H 'Content-Type: application/json' \
                 -d @/mapping.json \

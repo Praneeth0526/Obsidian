@@ -25,6 +25,8 @@ message SearchResult {
     float keyword_score = 9;     // Score from keyword search
     float combined_score = 10;   // Final ranking score
     map<string, string> highlights = 11;  // Matching snippets
+    string snippet = 12;                  // First ~300 chars of Tika-extracted text
+    float rerank_score = 13;              // Score from cross-encoder reranker
 }
 
 message SearchQueryResponse {

@@ -154,28 +154,16 @@ function SummaryPanel({ results, query, intentText }) {
 
   if (!results || results.length === 0) return null;
 
-  // Compute stats
-  const total = results.length;
-  const typeCounts = {};
-  results.forEach((r) => {
+  const top = results[0];
+  const fileName = top.object_name?.split("/").pop() || top.object_name || "—";
+
+  const pct = (v) => `${Math.round((v || 0) * 100)}%`;
+
+  const typeCounts = results.reduce((acc, r) => {
     const ext = (r.extension || "unknown").toLowerCase();
-    typeCounts[ext] = (typeCounts[ext] || 0) + 1;
-  });
-
-  const dates = results
-    .map((r) => r.last_modified)
-    .filter(Boolean)
-    .map((d) => new Date(d).getTime())
-    .filter((t) => !isNaN(t));
-  const earliest = dates.length ? new Date(Math.min(...dates)) : null;
-  const latest = dates.length ? new Date(Math.max(...dates)) : null;
-
-  const dateRangeStr =
-    earliest && latest
-      ? earliest.getTime() === latest.getTime()
-        ? formatDate(earliest)
-        : `${formatDate(earliest)} – ${formatDate(latest)}`
-      : "—";
+    acc[ext] = (acc[ext] || 0) + 1;
+    return acc;
+  }, {});
 
   return (
     <div className={`summary-panel ${open ? "summary-open" : "summary-closed"}`}>
@@ -193,34 +181,66 @@ function SummaryPanel({ results, query, intentText }) {
 
       {open && (
         <div className="summary-body">
-          {intentText && (
-            <p className="summary-intent">&ldquo;{intentText}&rdquo;</p>
+
+          {/* AI-generated summary card */}
+          {top.snippet && (
+            <div className="summary-card">
+              <div className="summary-card-label">Document Summary</div>
+              <p className="summary-card-text">{top.snippet}</p>
+            </div>
           )}
-          <div className="summary-stats">
-            <div className="stat-item">
-              <span className="stat-label">Total Results</span>
-              <span className="stat-value">{total}</span>
+
+          {/* Top result compact info */}
+          <div className="summary-file-row">
+            <FileIcon ext={top.extension} />
+            <span className="summary-filename" title={top.object_name}>{fileName}</span>
+          </div>
+
+          {/* 2×2 metadata grid */}
+          <div className="summary-meta-grid">
+            <div className="meta-grid-item">
+              <span className="meta-grid-label">Bucket</span>
+              <span className="meta-grid-value">{top.bucket || "—"}</span>
             </div>
-            <div className="stat-item">
-              <span className="stat-label">Date Range</span>
-              <span className="stat-value stat-date">{dateRangeStr}</span>
+            <div className="meta-grid-item">
+              <span className="meta-grid-label">Type</span>
+              <span className="meta-grid-value">{top.extension ? `.${top.extension}` : "—"}</span>
+            </div>
+            <div className="meta-grid-item">
+              <span className="meta-grid-label">Size</span>
+              <span className="meta-grid-value">{formatBytes(top.size_bytes)}</span>
+            </div>
+            <div className="meta-grid-item">
+              <span className="meta-grid-label">Uploaded</span>
+              <span className="meta-grid-value">{formatDate(top.last_modified)}</span>
             </div>
           </div>
-          <div className="summary-types">
-            <span className="stat-label">File Types</span>
-            <div className="type-pills">
-              {Object.entries(typeCounts).map(([ext, count]) => (
-                <span key={ext} className="type-pill">
-                  .{ext} <strong>{count}</strong>
-                </span>
-              ))}
-            </div>
+
+          {/* Inline score badges */}
+          <div className="score-badges">
+            <span className="score-badge score-semantic" title="Semantic similarity score">
+              S {pct(top.semantic_score)}
+            </span>
+            <span className="score-badge score-keyword" title="Keyword match score">
+              K {pct(top.keyword_score)}
+            </span>
+            <span className="score-badge score-combined" title="Final combined score">
+              ★ {pct(top.combined_score)}
+            </span>
+            <span className="score-badge score-count">
+              {results.length} match{results.length !== 1 ? "es" : ""}
+            </span>
+            {Object.entries(typeCounts).map(([ext, count]) => (
+              <span key={ext} className="score-badge score-type">.{ext} {count}</span>
+            ))}
           </div>
+
         </div>
       )}
     </div>
   );
 }
+
 
 /* ── User Query Bubble with Copy & Edit ── */
 function UserBubble({ text, onEdit }) {
@@ -448,8 +468,30 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [previewItem, setPreviewItem] = useState(null);
+  const [recentQueries, setRecentQueries] = useState([]);
   const chatEndRef = useRef(null);
   const inputRef = useRef(null);
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem("hpe_recent_queries");
+      if (stored) {
+        setRecentQueries(JSON.parse(stored));
+      }
+    } catch (e) {
+      console.error("Failed to load recent queries", e);
+    }
+  }, []);
+
+  const addRecentQuery = (q) => {
+    setRecentQueries(prev => {
+      const updated = [q, ...prev.filter(x => x !== q)].slice(0, 10);
+      try {
+        localStorage.setItem("hpe_recent_queries", JSON.stringify(updated));
+      } catch(e) {}
+      return updated;
+    });
+  };
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -458,6 +500,8 @@ export default function Home() {
   const sendSearch = async (q) => {
     const trimmed = q.trim();
     if (!trimmed || loading) return;
+
+    addRecentQuery(trimmed);
 
     setMessages((prev) => [...prev, { role: "user", text: trimmed }]);
     setQuery("");
@@ -512,10 +556,76 @@ export default function Home() {
   const handlePreview = useCallback((item) => setPreviewItem(item), []);
   const handleClosePreview = useCallback(() => setPreviewItem(null), []);
 
+  // ── Live polling: silently re-fetch latest query every 30s ─────────────────
+  const [pendingUpdate, setPendingUpdate] = useState(null); // new results waiting
+  const [showToast, setShowToast] = useState(false);
+  const pollingRef = useRef(null);
+
+  useEffect(() => {
+    // Only poll when there is an active search result
+    if (!latestAssistant) {
+      if (pollingRef.current) clearInterval(pollingRef.current);
+      return;
+    }
+    const lastQuery = latestAssistant.query;
+    const currentNames = (latestAssistant.results || []).map((r) => r.object_name).sort().join(",");
+
+    pollingRef.current = setInterval(async () => {
+      try {
+        const baseUrl = API_BASE ? `${API_BASE}/search` : "/api/search";
+        const res = await fetch(`${baseUrl}?q=${encodeURIComponent(lastQuery)}&limit=8`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const newNames = (data.results || []).map((r) => r.object_name).sort().join(",");
+        // Show toast only if results actually changed
+        if (newNames !== currentNames) {
+          setPendingUpdate(data);
+          setShowToast(true);
+          clearInterval(pollingRef.current);
+        }
+      } catch (_) { /* silently ignore poll errors */ }
+    }, 30000); // poll every 30 seconds
+
+    return () => clearInterval(pollingRef.current);
+  }, [latestAssistant]);
+
+  // Apply the pending update when user clicks Refresh on toast
+  const applyUpdate = useCallback(() => {
+    if (!pendingUpdate || !latestAssistant) return;
+    setMessages((prev) =>
+      prev.map((m, i) =>
+        i === prev.lastIndexOf(latestAssistant)
+          ? { ...m, results: pendingUpdate.results, intentText: pendingUpdate.intent_text }
+          : m
+      )
+    );
+    setPendingUpdate(null);
+    setShowToast(false);
+  }, [pendingUpdate, latestAssistant]);
+
+  const dismissToast = useCallback(() => {
+    setShowToast(false);
+  }, []);
+
+
   return (
     <div className="app">
       {/* Preview modal */}
       {previewItem && <PreviewModal item={previewItem} onClose={handleClosePreview} />}
+
+      {/* Live update toast */}
+      {showToast && (
+        <div className="live-toast" role="alert">
+          <span className="live-toast-dot" />
+          <span className="live-toast-text">New results available</span>
+          <button className="live-toast-btn" onClick={applyUpdate}>Refresh</button>
+          <button className="live-toast-dismiss" onClick={dismissToast} aria-label="Dismiss">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+      )}
 
       {/* Background mesh */}
       <div className="bg-mesh" />
@@ -540,13 +650,31 @@ export default function Home() {
               <span className="hero-search">Search</span>
             </div>
             <p className="hero-sub">Search your object storage with natural language.</p>
-            <div className="suggestion-chips">
-              {SUGGESTIONS.map((s) => (
-                <button key={s} className="chip" onClick={() => sendSearch(s)}>
-                  {s}
-                </button>
-              ))}
-            </div>
+            {recentQueries.length > 0 ? (
+              <div className="hero-recent">
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", marginBottom: "16px", color: "var(--text-secondary)", fontSize: "0.9rem", fontWeight: 500 }}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{width: 16, height: 16}}>
+                    <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+                  </svg>
+                  <span>Recent Searches</span>
+                </div>
+                <div className="suggestion-chips">
+                  {recentQueries.slice(0, 5).map((s) => (
+                    <button key={s} className="chip" onClick={() => sendSearch(s)}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="suggestion-chips">
+                {SUGGESTIONS.map((s) => (
+                  <button key={s} className="chip" onClick={() => sendSearch(s)}>
+                    {s}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -568,6 +696,10 @@ export default function Home() {
                       <span className="assistant-badge">Object Search</span>
                       {msg.results && (
                         <span className="result-count">
+                          {/* Pulsing live dot on the latest result row */}
+                          {i === messages.lastIndexOf(latestAssistant) && (
+                            <span className="live-dot" title="Live — auto-refreshes every 30s" />
+                          )}
                           {msg.results.length} result{msg.results.length !== 1 ? "s" : ""} for &ldquo;{msg.query}&rdquo;
                         </span>
                       )}
@@ -659,18 +791,34 @@ export default function Home() {
           </div>
 
           {/* Suggestions dropdown */}
-          {showSuggestions && isFirstSearch && query.length > 0 && (
-            <div className="dropdown">
-              {SUGGESTIONS.filter((s) => s.includes(query.toLowerCase())).map((s) => (
-                <div key={s} className="dropdown-item" onMouseDown={() => sendSearch(s)}>
-                  <svg className="dropdown-history-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
-                  </svg>
-                  <span>{s}</span>
+          {(() => {
+            const lowerQuery = query.toLowerCase().trim();
+            let suggestions = [];
+            if (lowerQuery) {
+              const matchingRecents = recentQueries.filter(q => q.toLowerCase().includes(lowerQuery));
+              const matchingStatic = SUGGESTIONS.filter(q => q.toLowerCase().includes(lowerQuery) && !matchingRecents.includes(q));
+              suggestions = [...matchingRecents, ...matchingStatic];
+            } else {
+              suggestions = recentQueries;
+            }
+            suggestions = suggestions.slice(0, 5);
+
+            if (showSuggestions && suggestions.length > 0) {
+              return (
+                <div className="dropdown">
+                  {suggestions.map((s) => (
+                    <div key={s} className="dropdown-item" onMouseDown={() => sendSearch(s)}>
+                      <svg className="dropdown-history-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+                      </svg>
+                      <span>{s}</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          )}
+              );
+            }
+            return null;
+          })()}
         </form>
         <p className="input-hint">Try: &ldquo;quarterly report pdf&rdquo; or &ldquo;images from last week&rdquo;</p>
       </div>

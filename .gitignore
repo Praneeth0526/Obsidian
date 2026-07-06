@@ -24,3 +24,9 @@ graphify-out/
 # Ingestion outputs
 output_dims/
 models/
+
+# Temporary test scripts and outputs
+/test_*.py
+/test_results.txt
+/os_res*.txt
+/opensearch_res*.txt

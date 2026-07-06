@@ -5,7 +5,7 @@ package search;
 option go_package = "github.com/hpe/search-engine/gateway/proto";
 
 service SearchWorker {
-    // ProcessQuery handles cache miss - parses query, vectorises, and performs hybrid search
+    // ProcessQuery handles cache miss - parses query, vectorizes, and performs hybrid search
     rpc ProcessQuery(SearchQueryRequest) returns (SearchQueryResponse);
 }
 
@@ -27,6 +27,7 @@ message SearchResult {
     float keyword_score = 9;     // Score from keyword search
     float combined_score = 10;   // Final ranking score
     map<string, string> highlights = 11;  // Matching snippets
+    string snippet = 12;                  // First ~300 chars of Tika-extracted text
 }
 
 message SearchQueryResponse {

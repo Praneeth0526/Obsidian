@@ -6,3 +6,4 @@ python-dateutil
 langchain-core
 opensearch-py
 spacy
+sentencepiece
