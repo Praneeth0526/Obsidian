@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dlq-retry-worker
+  namespace: hpe-search
+  labels:
+    app: dlq-retry-worker
+    component: ingestion
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dlq-retry-worker
+  template:
+    metadata:
+      labels:
+        app: dlq-retry-worker
+        component: ingestion
+    spec:
+      initContainers:
+        # Wait until all 3 Kafka brokers are reachable before subscribing to DLQ
+        - name: wait-for-kafka
+          image: apache/kafka:3.8.1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "Waiting for Kafka..."
+              until /opt/kafka/bin/kafka-topics.sh \
+                --bootstrap-server kafka-headless.hpe-search.svc.cluster.local:9092 \
+                --list > /dev/null 2>&1; do
+                echo "  Kafka not ready, retrying in 5s..."; sleep 5
+              done
+              echo "Kafka is ready."
+      containers:
+        - name: dlq-retry-worker
+          image: hpe-ingestion-worker:latest
+          imagePullPolicy: Never
+          # Override the default entrypoint to run the DLQ consumer instead
+          command: ["python3", "dlq_retry_worker.py"]
+          envFrom:
+            - configMapRef:
+                name: hpe-search-config
+          env:
+            # Retry schedule: 1 min → 5 min → 15 min before permanent failure
+            - name: MAX_RETRY_ATTEMPTS
+              value: "3"
+            - name: RETRY_BACKOFF_SECONDS
+              value: "60,300,900"
+            - name: KAFKA_DLQ_RETRY_GROUP_ID
+              value: "dlq-retry-worker"
+            # Write permanently-failed events to a volume so they survive restarts
+            - name: PERMANENT_FAILURE_LOG
+              value: "/data/permanent_failures.jsonl"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: failure-log
+              mountPath: /data
+      volumes:
+        - name: failure-log
+          emptyDir: {}   # survives pod restarts; replace with PVC for persistence

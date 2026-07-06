@@ -168,6 +168,7 @@ kubectl wait --for=condition=complete job/opensearch-init -n "${NAMESPACE}" --ti
 info "Deploying ingestion pipeline..."
 kubectl apply -f "${K8S_DIR}/ingestion/model-server.yaml"
 kubectl apply -f "${K8S_DIR}/ingestion/ingestion-worker.yaml"
+kubectl apply -f "${K8S_DIR}/ingestion/dlq-retry-worker.yaml"
 
 info "Deploying search pipeline..."
 kubectl apply -f "${K8S_DIR}/search/pyworker.yaml"
@@ -177,12 +178,13 @@ kubectl apply -f "${K8S_DIR}/search/frontend.yaml"
 # Force pods to pick up newly-built local images (imagePullPolicy: Never + mutable :latest tag
 # means Kubernetes won't restart pods automatically when the local image changes).
 info "Rolling out updated images..."
-kubectl rollout restart deployment/model-server    -n "${NAMESPACE}"
-kubectl rollout restart deployment/ingestion-worker -n "${NAMESPACE}"
-kubectl rollout restart deployment/pyworker        -n "${NAMESPACE}"
-kubectl rollout restart deployment/go-gateway      -n "${NAMESPACE}"
-kubectl rollout restart deployment/frontend        -n "${NAMESPACE}"
-kubectl rollout status  deployment/frontend        -n "${NAMESPACE}" --timeout=120s
+kubectl rollout restart deployment/model-server      -n "${NAMESPACE}"
+kubectl rollout restart deployment/ingestion-worker  -n "${NAMESPACE}"
+kubectl rollout restart deployment/dlq-retry-worker  -n "${NAMESPACE}"
+kubectl rollout restart deployment/pyworker          -n "${NAMESPACE}"
+kubectl rollout restart deployment/go-gateway        -n "${NAMESPACE}"
+kubectl rollout restart deployment/frontend          -n "${NAMESPACE}"
+kubectl rollout status  deployment/frontend          -n "${NAMESPACE}" --timeout=120s
 
 # -----------------------------------------------------------------------------
 # 7. Summary
