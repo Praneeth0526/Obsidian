@@ -473,6 +473,7 @@ class IngestionWorker:
                 logger.info("Shutdown: waiting for %d in-flight task(s) to finish...", len(pending))
                 await asyncio.gather(*pending, return_exceptions=True)
 
+
         finally:
             self.consumer.close()
             self.dlq_producer.flush(timeout=15)

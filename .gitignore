@@ -29,3 +29,9 @@ models/
 
 # Docker local overrides
 docker-compose.override.yml
+
+# Temporary test scripts and outputs
+/test_*.py
+/test_results.txt
+/os_res*.txt
+/opensearch_res*.txt

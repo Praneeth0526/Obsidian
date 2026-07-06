@@ -36,8 +36,8 @@ fi
 # -----------------------------------------------------------------------------
 info "Starting Minikube..."
 minikube start \
-  --cpus=4 \
-  --memory=8192 \
+  --cpus=2 \
+  --memory=4096 \
   --disk-size=40g \
   --driver=docker 2>/dev/null || true
 
@@ -115,8 +115,31 @@ kubectl apply -f "${K8S_DIR}/infrastructure/redis.yaml"
 info "Waiting for Kafka brokers (this may take ~2 min)..."
 kubectl rollout status statefulset/kafka -n "${NAMESPACE}" --timeout=180s
 
+info "Creating Kafka topics explicitly to prevent ingestion worker crash..."
+kubectl exec kafka-0 -n "${NAMESPACE}" -- /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --create --if-not-exists \
+  --topic file-upload-events \
+  --partitions 3 \
+  --replication-factor 3
+
 info "Waiting for OpenSearch..."
 kubectl rollout status deployment/opensearch -n "${NAMESPACE}" --timeout=180s
+
+info "Creating OpenSearch index mapping explicitly to prevent ingestion worker crash..."
+kubectl exec deployment/opensearch -n "${NAMESPACE}" -- /bin/sh -c '
+  if curl -sf -I http://localhost:9200/hpe-search-docs; then
+    echo "Index exists, skipping creation."
+  else
+    echo "Creating index with mapping..."
+    curl -sf -X PUT http://localhost:9200/hpe-search-docs \
+      -H "Content-Type: application/json" \
+      -d @/usr/share/opensearch/data/mapping.json || \
+    curl -sf -X PUT http://localhost:9200/hpe-search-docs \
+      -H "Content-Type: application/json" \
+      -d "$(cat /etc/opensearch-index-mapping/mapping.json 2>/dev/null || echo "{}")"
+  fi
+' || true
 
 info "Waiting for MinIO..."
 kubectl rollout status deployment/minio -n "${NAMESPACE}" --timeout=120s
@@ -125,14 +148,17 @@ kubectl rollout status deployment/minio -n "${NAMESPACE}" --timeout=120s
 # 5. Run init jobs
 # -----------------------------------------------------------------------------
 info "Running Kafka init job..."
+kubectl delete -f "${K8S_DIR}/infrastructure/kafka-init-job.yaml" --ignore-not-found
 kubectl apply -f "${K8S_DIR}/infrastructure/kafka-init-job.yaml"
 kubectl wait --for=condition=complete job/kafka-init -n "${NAMESPACE}" --timeout=120s
 
 info "Running MinIO init job..."
+kubectl delete -f "${K8S_DIR}/infrastructure/minio-init-job.yaml" --ignore-not-found
 kubectl apply -f "${K8S_DIR}/infrastructure/minio-init-job.yaml"
 kubectl wait --for=condition=complete job/minio-init -n "${NAMESPACE}" --timeout=120s
 
 info "Running OpenSearch init job..."
+kubectl delete -f "${K8S_DIR}/infrastructure/opensearch-init-job.yaml" --ignore-not-found
 kubectl apply -f "${K8S_DIR}/infrastructure/opensearch-init-job.yaml"
 kubectl wait --for=condition=complete job/opensearch-init -n "${NAMESPACE}" --timeout=120s
 

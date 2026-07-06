@@ -24,16 +24,41 @@ spec:
               until curl -sf http://model-server:8000/health; do
                 echo "Waiting for model-server..."; sleep 10
               done
-        # Don't start consuming until opensearch-init job has run
-        - name: wait-for-opensearch
+        # Check mapping and create if missing
+        - name: ensure-index-mapping
           image: curlimages/curl:latest
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-c"]
           args:
             - |
-              until curl -sf http://opensearch:9200/hpe-search-docs; do
-                echo "Waiting for opensearch index..."; sleep 10
+              until curl -sf http://opensearch:9200/_cluster/health; do
+                echo "Waiting for OpenSearch to be reachable..."; sleep 5
               done
+              
+              echo "Checking if index exists..."
+              if curl -sf -I http://opensearch:9200/hpe-search-docs; then
+                echo "Index exists. Checking mapping type..."
+                # Ideally we check the mapping, but for now we trust it if it exists.
+                # If someone needs to fix it, they must delete the index manually.
+                exit 0
+              else
+                echo "Index does not exist. Creating with explicit mapping..."
+                RES=$(curl -s -X PUT http://opensearch:9200/hpe-search-docs \
+                  -H 'Content-Type: application/json' \
+                  -d @/mapping.json)
+                echo "Response: $RES"
+                if echo "$RES" | grep -q '"acknowledged":true'; then
+                  echo "Index successfully created with mapping."
+                  exit 0
+                else
+                  echo "Failed to create index with proper mapping."
+                  exit 1
+                fi
+              fi
+          volumeMounts:
+            - name: mapping
+              mountPath: /mapping.json
+              subPath: mapping.json
       containers:
         - name: ingestion-worker
           image: hpe-ingestion-worker:latest
@@ -48,3 +73,7 @@ spec:
             limits:
               memory: "1Gi"
               cpu: "500m"
+      volumes:
+        - name: mapping
+          configMap:
+            name: opensearch-index-mapping

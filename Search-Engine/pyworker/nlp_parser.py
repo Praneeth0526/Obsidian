@@ -34,15 +34,31 @@ class NLPQueryParser:
         (r"<\s*(\d+(?:\.\d+)?)\s*(KB|MB|GB|TB)",              "size_lt"),
     ]
 
-    # File type patterns
+    # Explicit known extensions (matched with or without trailing 's' for plural)
+    KNOWN_EXTENSIONS = [
+        "png", "jpg", "jpeg", "gif", "svg", "webp",
+        "pdf", "csv", "txt", "rtf", "zip", "rar", "tar", "gz", "7z",
+        "docx", "xlsx", "pptx", "ppt", "xls",
+        "mp3", "wav", "mp4", "mkv", "avi", "mov"
+    ]
+
+    # General file type patterns
     TYPE_PATTERNS = [
-        (r"\b(pdfs?)\b",                       "pdf"),
-        (r"\b(images?|pictures?|photos?)\b",   "image"),
-        (r"\b(videos?|movies?)\b",             "video"),
-        (r"\b(documents?|docs?)\b",            "document"),
-        (r"\b(audio|music|songs?)\b",          "audio"),
-        (r"\b(archives?|zips?|compressed)\b",  "archive"),
-        (r"\.(\w+)\b",                         "extension"),
+        (r"\b(images?|pictures?|photos?)\b",               "image"),
+        (r"\b(videos?|movies?)\b",                         "video"),
+        (r"\b(documents?|docs?|word\s+files?)\b",          "document"),
+        (r"\b(audio|music|songs?)\b",                      "audio"),
+        (r"\b(archives?|compressed)\b",                    "archive"),
+        (r"\b(powerpoints?|slides?|presentations?)\b",     "presentation"),
+        (r"\b(excel|spreadsheets?)\b",                     "spreadsheet"),
+    ]
+
+    # Conversational filler to strip out entirely
+    CONVERSATIONAL_FILLER = [
+        r"\b(show|get|find|search|give|bring)\s+(me|us)\b",
+        r"\b(get|find|show|search)\b",
+        r"\b(files?|documents?|objects?)\s+(related\s+to|about|on|for)\b",
+        r"\b(related\s+to|about|on|for)\b"
     ]
 
     # Tokens to strip before building the intent / keyword string
@@ -112,8 +128,9 @@ class NLPQueryParser:
         filters.extend(self._extract_size_filters(query))
         filters.extend(self._extract_type_filters(query))
 
-        # 2. Strip filter-matched tokens from the text before NLP
+        # 2. Strip filter-matched tokens and conversational filler before NLP
         stripped = self._strip_filter_text(query)
+        stripped = self._strip_conversational_filler(stripped)
 
         # 3. Run spaCy on the stripped text
         doc = self.nlp(stripped)
@@ -180,13 +197,21 @@ class NLPQueryParser:
 
     def _extract_type_filters(self, query: str) -> List[str]:
         filters = []
-        for pattern, type_name in self.TYPE_PATTERNS[:-1]:   # skip the extension catch-all
+        # General types
+        for pattern, type_name in self.TYPE_PATTERNS:
             if re.search(pattern, query, re.IGNORECASE):
                 filters.append(f"type:{type_name}")
-        ext_match = re.search(r"\.(\w+)", query)
-        if ext_match:
-            filters.append(f"extension:{ext_match.group(1).lower()}")
-        return filters
+                
+        # Known extensions without dot (e.g. "pngs", "docx")
+        ext_pattern = r"\b(" + "|".join(self.KNOWN_EXTENSIONS) + r")s?\b"
+        for match in re.finditer(ext_pattern, query, re.IGNORECASE):
+            filters.append(f"extension:{match.group(1).lower()}")
+            
+        # Catch-all for extensions with dot (e.g. ".pdf")
+        for match in re.finditer(r"\.(\w+)\b", query):
+            filters.append(f"extension:{match.group(1).lower()}")
+            
+        return list(set(filters))
 
     def _strip_filter_text(self, query: str) -> str:
         """Remove date/size/type pattern text before passing to spaCy."""
@@ -198,6 +223,20 @@ class NLPQueryParser:
         for pattern, _ in self.SIZE_PATTERNS:
             text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
         for pattern, _ in self.TYPE_PATTERNS:
+            text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
+            
+        # Strip known extensions and plurals
+        ext_pattern = r"\b(" + "|".join(self.KNOWN_EXTENSIONS) + r")s?\b"
+        text = re.sub(ext_pattern, " ", text, flags=re.IGNORECASE)
+        
+        # Strip dot extensions
+        text = re.sub(r"\.\w+\b", " ", text, flags=re.IGNORECASE)
+        
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _strip_conversational_filler(self, text: str) -> str:
+        """Remove conversational phrasing like 'show me files related to'."""
+        for pattern in self.CONVERSATIONAL_FILLER:
             text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
         return re.sub(r"\s+", " ", text).strip()
 
@@ -217,6 +256,7 @@ class NLPQueryParser:
 
     def _extract_intent_text_regex(self, query: str) -> str:
         text = self._strip_filter_text(query)
+        text = self._strip_conversational_filler(text)
         words = text.split()
         meaningful = [w for w in words if w.lower() not in self.STOPWORDS]
         return " ".join(meaningful) if meaningful else ""

@@ -1,4 +1,4 @@
-# HPE Search Engine — Go Gateway + PyWorker + Redis + OpenSearch
+# HPE Object Search Engine — Go Gateway + PyWorker + Redis + OpenSearch
 
 > **Stage 2 — Real-Time Search** | Roles 4 & 5
 
@@ -26,9 +26,9 @@ The search-side pipeline. Receives a natural-language query from the browser, ch
 
 | Container | Port | What it does |
 |-----------|------|--------------|
-| `frontend` | `3000` | Next.js HPE-themed search UI |
+| `frontend` | `3000` | Next.js Object Search UI |
 | `go-gateway` | `8080` | REST entry point — `GET /search`, `GET /health` |
-| `pyworker-2` | `50052` | gRPC — spaCy NLP → SentenceTransformer embed → OpenSearch |
+| `pyworker-2` | `50052` | gRPC — spaCy NLP → SentenceTransformer embed → OpenSearch + T5 summarizer |
 | `opensearch` | `9200` | Hybrid BM25 + kNN search database |
 | `opensearch-dashboards` | `5601` | Dev UI for inspecting the index |
 | `redis` | `6379` | Search result cache (Steps 1 & 4 of search flow) |
@@ -91,43 +91,22 @@ echo 'sudo sysctl -w vm.max_map_count=262144 > /dev/null 2>&1' >> ~/.bashrc
 
 #### 1. Docker Engine on RHEL 10
 
-> **Note:** Docker CE is not in the default RHEL repos. Add Docker's official RHEL repository.
-
 ```bash
-# Add Docker CE repo (DNF5 syntax)
 sudo dnf5 config-manager addrepo \
   --from-repofile=https://download.docker.com/linux/rhel/docker-ce.repo
 
-# Install Docker CE + Compose plugin
 sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-# Enable and start the Docker daemon
 sudo systemctl enable --now docker
-
-# Allow your user to run Docker without sudo
 sudo usermod -aG docker $USER && newgrp docker
 
-# Verify
 docker --version          # Docker version 26.x or higher
 docker compose version    # Docker Compose version v2.27 or higher
 ```
 
-> **SELinux note (RHEL 10):** SELinux is enforcing by default. If containers fail to read bind-mounted paths:
-> ```bash
-> # Option A — label the host path (preferred for production)
-> chcon -Rt container_file_t /path/to/your/data
->
-> # Option B — set permissive temporarily (testing only)
-> sudo setenforce 0
-> ```
-
 #### 2. OpenSearch kernel setting (RHEL 10)
 
 ```bash
-# Apply immediately (no reboot needed)
 sudo sysctl -w vm.max_map_count=262144
-
-# Persist across reboots via sysctl.d drop-in
 echo "vm.max_map_count=262144" | sudo tee /etc/sysctl.d/99-opensearch.conf
 sudo sysctl --system
 ```
@@ -136,41 +115,15 @@ sudo sysctl --system
 
 ### Fedora 43 — x86\_64
 
-> Fedora 43 ships with **DNF5** by default. The syntax differs slightly from older DNF4 commands.
-
-#### 1. Docker Engine on Fedora 43
-
 ```bash
-# Add Docker CE repo for Fedora (DNF5 syntax)
 sudo dnf5 config-manager addrepo \
   --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo
 
-# Install Docker CE + Compose plugin
 sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-# Enable and start Docker
 sudo systemctl enable --now docker
-
-# Allow non-root use
 sudo usermod -aG docker $USER && newgrp docker
 
-# Verify
-docker --version
-docker compose version
-```
-
-> **SELinux note (Fedora 43):** Fedora enforces SELinux. Apply the `container_file_t` label to any directories you bind-mount:
-> ```bash
-> chcon -Rt container_file_t /path/to/your/data
-> ```
-
-#### 2. OpenSearch kernel setting (Fedora 43)
-
-```bash
-# Apply immediately
 sudo sysctl -w vm.max_map_count=262144
-
-# Persist across reboots
 echo "vm.max_map_count=262144" | sudo tee /etc/sysctl.d/99-opensearch.conf
 sudo sysctl --system
 ```
@@ -239,39 +192,51 @@ Frontend :3000
 Go Gateway :8080
   │
   ├─ Step 1: Redis lookup  ──── HIT ──▶ return immediately (X-Cache: HIT)
-  │            :6379                     ↑
-  │                                      │
-  └─ MISS ──▶ gRPC ProcessQuery          │
-                │                        │
-                ▼                        │
-         PyWorker-2 :50052               │
-           │ a. spaCy NLP parse          │
-           │    · exact dates → range    │
-           │    · relative dates/type/   │
-           │      size → filter clauses  │
-           │ b. SentenceTransformer      │
-           │    embed (384-dim)          │
-           │ c. OpenSearch query:        │
-           │    - kNN semantic match     │
-           │    - BM25 keyword match     │
-           │    - match_all if filters   │
-           │ d. Merge & Rank:            │
-           │    - blend kNN/BM25 scores  │
-           │    - dedup chunks by file   │
-           │    - combined_score >= 0.55 │
-           ▼                             │
-         OpenSearch :9200                │
-           │ Top-K results               │
-           ▼                             │
-         Go Gateway                      │
-           │ parse & format response     │
-           │                             │
-  Step 4: Redis store ──────────────────┘  (X-Cache: MISS)
-           │ TTL = default (300s) or
-           │       popular (1800s if hits ≥ 10)
+  │            :6379
+  │
+  └─ MISS ──▶ gRPC ProcessQuery
+                │
+                ▼
+         PyWorker-2 :50052
+           │ a. spaCy NLP parse
+           │    · exact dates → range filter
+           │    · relative dates/type/size → filter clauses
+           │ b. SentenceTransformer embed (384-dim)
+           │ c. OpenSearch hybrid query:
+           │    - kNN semantic search (HNSW cosine, k=50)
+           │    - BM25 keyword search (fuzziness: AUTO)
+           │    - match_all if filter-only (no keywords)
+           │ d. Merge & Rank:
+           │    - blend kNN (0.6) + BM25 (0.4) scores
+           │    - dedup chunks — one result per file
+           │    - combined_score >= 0.45 threshold
+           │ e. Abstractive summarization:
+           │    - google/flan-t5-small generates human summary
+           │    - per top-result chunk_text from Tika
            ▼
-         Frontend — render results
+         OpenSearch :9200 → Top-K results
+           ▼
+         Go Gateway → parse & format response
+           │
+  Step 4: Redis store (X-Cache: MISS)
+           │ TTL = default (300s) or popular (1800s if hits ≥ 10)
+           ▼
+         Frontend — render results + compact AI Summary panel
 ```
+
+---
+
+## AI Summary Panel
+
+When results are returned, the frontend renders a compact **AI Summary** panel on the right side with:
+
+| Section | Content |
+|---------|---------|
+| **Document Summary** | Abstractive summary generated by `google/flan-t5-small` from the top result's extracted text |
+| **File Info** | Filename, Bucket, Type, Size, Upload date in a 2×2 grid |
+| **Score Badges** | Inline pills — Semantic (S), Keyword (K), Combined (★), match count, file type breakdown |
+
+The T5 model is loaded once at `pyworker` startup and runs on CPU for low-latency inference.
 
 ---
 
@@ -286,6 +251,7 @@ Go Gateway :8080
 | `marketing deck .pptx` | keywords: `marketing deck` + `extension:pptx` |
 | `files uploaded on May 15th` | `exact_date:may_15_<year>` → 24-hour range filter |
 | `pdfs` | `type:pdf` filter → `match_all` (no keywords required) |
+| `informaton tecnology act` | fuzzy BM25 corrects typos → matches IT Act PDF |
 
 ---
 
@@ -295,6 +261,21 @@ Index name: **`hpe-search-docs`** (set via `OPENSEARCH_INDEX` env var).
 
 The index is automatically created by the ingestion pipeline's `opensearch-init` container using the mapping at `../infrastructure/opensearch/index-mapping.json`.
 
+> **Important:** The `embedding` field **must** be mapped as `knn_vector` type (dimension: 384, engine: nmslib, space: cosinesimil) for semantic search to work. If you see `Field 'embedding' is not knn_vector type`, the index was auto-created with a plain `float` type. Fix it by dropping and recreating:
+
+```bash
+# Drop the incorrectly typed index
+kubectl exec -n hpe-search deploy/opensearch -- curl -s -X DELETE localhost:9200/hpe-search-docs
+
+# Recreate with correct knn_vector mapping
+kubectl exec -n hpe-search deploy/opensearch -- curl -s -X PUT localhost:9200/hpe-search-docs \
+  -H "Content-Type: application/json" \
+  -d "$(cat infrastructure/opensearch/index-mapping.json)"
+
+# Re-upload files to trigger re-ingestion
+aws s3 cp ./yourfile.pdf s3://uploads/ --endpoint-url http://$(minikube ip):30900
+```
+
 To create it manually on a fresh local OpenSearch:
 
 ```bash
@@ -303,7 +284,18 @@ curl -X PUT http://localhost:9200/hpe-search-docs \
   -d @../infrastructure/opensearch/index-mapping.json
 ```
 
-The index uses kNN plugin (HNSW, 384 dimensions) + standard BM25 for hybrid search.
+---
+
+## Search Relevance Tuning
+
+| Parameter | Value | Location | Effect |
+|-----------|-------|----------|--------|
+| `SEARCH_KNN_BOOST` | `0.6` | `01-configmap.yaml` / `.env` | Weight of semantic score |
+| `SEARCH_BM25_BOOST` | `0.4` | `01-configmap.yaml` / `.env` | Weight of keyword score |
+| `SEARCH_KNN_K` | `50` | `01-configmap.yaml` / `.env` | Number of kNN candidates |
+| `combined_score` threshold | `0.45` | `search_worker.py` | Minimum score to surface a result |
+| BM25 `fuzziness` | `AUTO` | `search_worker.py` | Typo tolerance for keyword matching |
+| BM25 `prefix_length` | `2` | `search_worker.py` | First 2 chars must match exactly |
 
 ---
 
@@ -315,11 +307,6 @@ The search pipeline is **read-only** — it queries the `hpe-search-docs` index 
 |-----------------|----------------------|------------------|
 | OpenSearch `hpe-search-docs` | `workers/ingestion/opensearch_client.py` bulk upsert | `pyworker/search_worker.py` hybrid query |
 | Redis cache | — | `gateway/cache/redis.go` GET/SET |
-
-To use the ingestion team's OpenSearch instead of running a local one:
-
-1. Comment out `opensearch` and `opensearch-dashboards` services in `docker-compose.yml`
-2. Set `OPENSEARCH_HOST=<ingestion_server_ip>` in `.env`
 
 ---
 
@@ -335,24 +322,28 @@ Search-Engine/
 │   ├── grpcclient/
 │   │   └── client.go               # gRPC client → PyWorker-2
 │   ├── merger/
-│   │   └── merger.go               # Top-K dedup + combined_score sort
+│   │   └── merger.go               # Top-K dedup + combined_score sort + Snippet propagation
 │   ├── proto/                      # Generated Go gRPC stubs
+│   │   └── search.proto            # Includes snippet field + go_package option
 │   ├── main.go                     # Server bootstrap (Redis + gRPC + HTTP)
 │   ├── Dockerfile
 │   └── go.mod
 │
 ├── pyworker/                       # gRPC search worker (Role 5)
-│   ├── search_worker.py            # gRPC servicer: NLP → embed → OpenSearch
+│   ├── search_worker.py            # gRPC servicer: NLP → embed → OpenSearch → T5 summarize
 │   ├── nlp_parser.py               # spaCy NLP — intent, keywords, filters
-│   ├── embedding_service.py        # SentenceTransformer all-MiniLM-L6-v2
+│   ├── embedding_service.py        # SentenceTransformer all-MiniLM-L6-v2 (384-dim)
 │   ├── config.py                   # All env-var config (OpenSearch + Redis)
+│   ├── requirements.txt            # Includes sentencepiece for T5 tokenizer
 │   ├── proto/                      # Generated Python gRPC stubs
 │   └── Dockerfile
 │
 ├── frontend/                       # Next.js search UI (Role 5)
 │   └── app/
-│       ├── page.js                 # Search page
-│       └── api/search/             # Fallback direct-to-OpenSearch route
+│       ├── page.js                 # Search page + compact AI Summary panel
+│       ├── globals.css             # Design system + compact summary layout styles
+│       └── api/
+│           └── download/           # MinIO presigned URL proxy
 │
 ├── docker-compose.yml              # 6 services: OS + Redis + pyworker + gateway + UI
 └── .env.example                    # All variables documented
@@ -377,6 +368,27 @@ Response:
 ```
 
 `redis: "unreachable"` is **non-fatal** — search still works, just without caching.
+
+---
+
+## Debugging
+
+```bash
+# Watch pyworker logs (NLP parsing, kNN/BM25 scores, T5 summarization)
+kubectl logs -n hpe-search deploy/pyworker -f
+
+# Watch go-gateway logs (cache hits/misses, request routing)
+kubectl logs -n hpe-search deploy/go-gateway -f
+
+# Flush Redis cache after a code change
+kubectl exec -n hpe-search deploy/redis -- redis-cli FLUSHALL
+
+# Check OpenSearch document count
+kubectl exec -n hpe-search deploy/opensearch -- curl -s localhost:9200/hpe-search-docs/_count?pretty
+
+# Test search API directly
+curl "http://$(minikube ip):30080/search?q=information+technology+act" | python3 -m json.tool
+```
 
 ---
 

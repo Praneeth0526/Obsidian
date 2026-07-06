@@ -22,6 +22,7 @@ type Result struct {
 	SemanticScore float32 `json:"semantic_score"`
 	KeywordScore  float32 `json:"keyword_score"`
 	CombinedScore float32 `json:"combined_score"`
+	Snippet       string  `json:"snippet"`
 }
 
 // SearchResponse is the top-level JSON body returned to the frontend.
@@ -66,6 +67,7 @@ func Merge(proto *pb.SearchQueryResponse, limit int) SearchResponse {
 			SemanticScore: r.SemanticScore,
 			KeywordScore:  r.KeywordScore,
 			CombinedScore: r.CombinedScore,
+			Snippet:       r.Snippet,
 		})
 	}
 
