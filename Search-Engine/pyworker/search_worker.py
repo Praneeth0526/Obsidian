@@ -172,6 +172,9 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
         results, t_batch, t_infer = self._rerank_results(query, results, limit)
         t_rerank = time.time() - t3
         
+        if results:
+            results[0]["snippet"] = self._summarize_text(results[0].get("chunk_text", "") or "")
+        
         print(f"[METRICS] Parse: {t_parse:.3f}s | Embed: {t_embed:.3f}s | Search: {t_search:.3f}s | Rerank Batch: {t_batch:.3f}s | Rerank Infer: {t_infer:.3f}s | Total: {(time.time() - t0):.3f}s")
 
         response_results = [
@@ -314,7 +317,7 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
                     "content_type": source.get("mime_type", ""),
                     "extension":    source.get("extension", ""),
                     "last_modified": source.get("uploaded_at", ""),
-                    "snippet":      self._summarize_text(source.get("chunk_text", "") or ""),
+                    "snippet":      "",
                     "chunk_text":   source.get("chunk_text", "") or "",
                     "highlights":   {},
                 })
@@ -489,18 +492,18 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
         except ValueError:
             return {"match_none": {}}
 
-        # Use timezone-aware UTC datetimes so the range matches the +00:00
-        # timestamps stored by the ingestion worker.
-        from datetime import datetime, timedelta, timezone
+        # OpenSearch best practice: use time_zone parameter to align local date queries with UTC storage.
+        from datetime import datetime, timedelta
+        tz_offset = os.getenv("SEARCH_TIMEZONE", "+05:30")
         try:
-            start = datetime(year, month, day, tzinfo=timezone.utc)
+            start = datetime(year, month, day)
             end   = start + timedelta(days=1)
-            # OpenSearch expects RFC-3339 with offset, e.g. "2026-06-04T00:00:00+00:00"
             return {
                 "range": {
                     "uploaded_at": {
                         "gte": start.isoformat(),
                         "lt":  end.isoformat(),
+                        "time_zone": tz_offset
                     }
                 }
             }
@@ -527,7 +530,16 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
         """Convert date filter to OpenSearch range clause."""
         date_key = filter_str.split(":", 1)[1]
         start, end = self.parser.get_date_range(date_key)
-        return {"range": {"uploaded_at": {"gte": start.isoformat(), "lte": end.isoformat()}}}
+        tz_offset = os.getenv("SEARCH_TIMEZONE", "+05:30")
+        return {
+            "range": {
+                "uploaded_at": {
+                    "gte": start.isoformat(),
+                    "lte": end.isoformat(),
+                    "time_zone": tz_offset
+                }
+            }
+        }
 
     def _parse_size_bytes(self, raw_value: str) -> int:
         """Parse size string like 10MB into bytes."""

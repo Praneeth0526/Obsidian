@@ -28,6 +28,7 @@ Usage:
 
 import asyncio
 import logging
+import math
 import os
 import time
 from typing import Optional
@@ -230,8 +231,9 @@ class ModelClient:
                 f"Model-server /embed/image returned unexpected body: {data!r}"
             )
 
-        logger.debug("Image embedded — vector dim=%d", len(embedding))
-        return embedding
+        sanitized = [0.0 if (x is None or (isinstance(x, float) and math.isnan(x))) else x for x in embedding]
+        logger.debug("Image embedded — vector dim=%d", len(sanitized))
+        return sanitized
 
     async def health_check(self) -> bool:
         """Return True if the model-server's /health endpoint responds 200."""
@@ -262,7 +264,14 @@ class ModelClient:
             raise EmbeddingError(
                 f"Model-server /embed/text returned unexpected body: {data!r}"
             )
-        return embeddings
+        
+        sanitized = []
+        for vec in embeddings:
+            if vec is None:
+                sanitized.append([0.0] * 384)
+            else:
+                sanitized.append([0.0 if (x is None or (isinstance(x, float) and math.isnan(x))) else x for x in vec])
+        return sanitized
 
     async def _request_with_retry(
         self,

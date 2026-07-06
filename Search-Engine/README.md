@@ -154,17 +154,16 @@ REDIS_TTL_POPULAR=1800
 REDIS_POPULAR_THRESHOLD=10
 ```
 
-### 2. Start
+### 2. Deploy to Minikube
+
+The entire search engine and ingestion pipeline is deployed using the central Kubernetes deployment script:
 
 ```bash
-docker compose up --build
+cd ..
+./k8s/deploy.sh
 ```
 
-Background:
-
-```bash
-docker compose up --build -d
-```
+This will automatically build the custom images inside Minikube and spin up the frontend, gateway, pyworker, and infrastructure (OpenSearch, Redis).
 
 ### 3. Search
 
@@ -395,8 +394,11 @@ curl "http://$(minikube ip):30080/search?q=information+technology+act" | python3
 ## Stopping
 
 ```bash
-docker compose down
+minikube stop
+```
 
-# Also remove volumes (OpenSearch data, Redis data)
-docker compose down -v
+To completely wipe the deployment and start fresh:
+
+```bash
+./k8s/deploy.sh --reset
 ```

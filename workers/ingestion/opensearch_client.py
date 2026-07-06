@@ -126,6 +126,13 @@ class ChunkDocument:
         # Remove empty embedding to avoid mapping errors during partial updates
         if not d.get("embedding"):
             del d["embedding"]
+            
+        # Remove empty dates to avoid OpenSearch date mapper_parsing_exception
+        if not d.get("doc_created_at"):
+            if "doc_created_at" in d: del d["doc_created_at"]
+        if not d.get("uploaded_at"):
+            if "uploaded_at" in d: del d["uploaded_at"]
+            
         return d
 
     def deterministic_id(self) -> str:
