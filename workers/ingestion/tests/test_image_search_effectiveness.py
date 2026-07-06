@@ -35,6 +35,8 @@ Usage:
 """
 
 from __future__ import annotations
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import asyncio
 import io
@@ -823,3 +825,4 @@ if __name__ == "__main__":
         print("✅  All unit tests passed")
         print("\nTo run integration tests (requires Docker):")
         print("    python -m pytest test_image_search_effectiveness.py -v -k integration")
+

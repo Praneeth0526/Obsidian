@@ -1,3 +1,5 @@
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 """
 test_e2e_full_pipeline.py — Comprehensive E2E test runner for the ingestion pipeline.
 

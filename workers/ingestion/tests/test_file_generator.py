@@ -1,3 +1,5 @@
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 """
 test_file_generator.py — Programmatic test file generation for E2E pipeline QA.
 
