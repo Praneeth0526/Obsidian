@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-const defaultTimeout = 10 * time.Second
+const defaultTimeout = 30 * time.Second
 
 // Client wraps the gRPC connection and the generated SearchWorker stub.
 type Client struct {

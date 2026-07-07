@@ -1,385 +1,101 @@
 """
-model_client.py — HTTP client for the shared Model Server.
-
-Sends text chunks (or preprocessed images) to the model-server and receives
-high-dimensional embedding vectors in return.
-
-Endpoints called:
-    POST /embed/text   — batch of strings  → batch of 384-dim float vectors
-    POST /embed/image  — multipart image   → single 384-dim float vector
-
-Design decisions:
-    - A single persistent ``httpx.AsyncClient`` is reused across all requests
-      so that TCP connections to the model-server are pooled.  This is
-      especially important for documents that produce many batches.
-    - Batches text chunks in configurable groups (default 32) to balance
-      throughput vs. model-server memory pressure.
-    - Retries on transient errors (5xx, timeouts, connection errors) with
-      exponential backoff. Does NOT retry on 4xx client errors.
-    - All config (URL, timeout, batch size, retries) comes from environment
-      variables so the worker is fully container-friendly.
-
-Usage:
-    client = ModelClient()                     # reads MODEL_SERVER_URL from env
-    vectors = await client.embed_texts(chunks) # list[str] → list[list[float]]
-    vector  = await client.embed_image(img_bytes, "image/jpeg")
-    await client.close()                       # release connections on shutdown
+model_client.py — Local Jina CLIP v2 Embedding Client.
+Replaced HTTP client with local model inference.
 """
 
 import asyncio
 import logging
-import math
 import os
-import time
+import tempfile
 from typing import Optional
 
-import httpx
+import torch
+from transformers import AutoModel
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Defaults (all overridable via environment variables)
-# ---------------------------------------------------------------------------
+# Device auto-detection
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-_DEFAULT_URL        = "http://localhost:8000"
-_DEFAULT_TIMEOUT    = 30.0   # seconds per request
-_DEFAULT_BATCH_SIZE = 32     # text chunks per /embed/text call
-_DEFAULT_MAX_RETRY  = 3      # total attempts (1 initial + 2 retries)
-_DEFAULT_BACKOFF    = 1.0    # base seconds for exponential backoff
+# Module-level singleton
+_jina_model = None
 
+def get_jina_model():
+    global _jina_model
+    if _jina_model is None:
+        logger.info("Loading Jina CLIP v2 model on %s...", device)
+        model_kwargs = {"trust_remote_code": True}
+        if device == "cpu":
+            model_kwargs["torch_dtype"] = torch.bfloat16
+        _jina_model = AutoModel.from_pretrained(
+            "jinaai/jina-clip-v2",
+            **model_kwargs
+        ).to(device)
+        _jina_model.eval()
+    return _jina_model
 
-# ---------------------------------------------------------------------------
-# Exceptions
-# ---------------------------------------------------------------------------
+def embed_text(texts: list[str]) -> list[list[float]]:
+    """
+    Embed list of texts into 512-dim vectors using Jina CLIP v2.
 
-class EmbeddingError(Exception):
-    """Raised when the model-server returns an unrecoverable error."""
+    TODO: All existing indexed documents need to be re-embedded and re-indexed
+    with the new model, since Jina CLIP v2 vectors are not compatible with
+    the old CLIP ViT-B/32 vectors even at the same dimension.
+    """
+    if not texts:
+        return []
+    model = get_jina_model()
+    with torch.no_grad():
+        embeddings = model.encode_text(texts, truncate_dim=512, batch_size=8)
+        if isinstance(embeddings, torch.Tensor):
+            embeddings = embeddings.cpu().detach().numpy()
+        return embeddings.tolist()
 
-
-# ---------------------------------------------------------------------------
-# Model Client
-# ---------------------------------------------------------------------------
+def embed_image(image_paths: list[str]) -> list[list[float]]:
+    """
+    Embed list of image paths into 512-dim vectors using Jina CLIP v2.
+    """
+    if not image_paths:
+        return []
+    model = get_jina_model()
+    with torch.no_grad():
+        embeddings = model.encode_image(image_paths, truncate_dim=512)
+        if isinstance(embeddings, torch.Tensor):
+            embeddings = embeddings.cpu().detach().numpy()
+        return embeddings.tolist()
 
 class ModelClient:
     """
-    Async HTTP client for the shared model-server.
-
-    A single persistent ``httpx.AsyncClient`` is maintained for the lifetime
-    of this object.  Call ``await close()`` when done to release connections,
-    or use the client as an async context manager.
-
-    Parameters:
-        model_server_url: Base URL of the model-server
-                          (default: ``MODEL_SERVER_URL`` env var or localhost).
-        timeout:          Per-request timeout in seconds
-                          (default: ``MODEL_SERVER_TIMEOUT`` env var or 30 s).
-        batch_size:       Max text chunks per ``/embed/text`` request
-                          (default: ``MODEL_SERVER_BATCH_SIZE`` env var or 32).
-        max_retries:      Total attempts before raising
-                          (default: ``MODEL_SERVER_MAX_RETRIES`` env var or 3).
-        backoff_base:     Base seconds for exponential backoff
-                          (default: ``MODEL_SERVER_BACKOFF`` env var or 1.0 s).
+    Wrapper class to match the ingestion worker's usage:
+      self.model_client.embed_texts(...)
+      self.model_client.embed_image(...)
     """
-
-    def __init__(
-        self,
-        model_server_url: Optional[str] = None,
-        timeout: Optional[float] = None,
-        batch_size: Optional[int] = None,
-        max_retries: Optional[int] = None,
-        backoff_base: Optional[float] = None,
-    ) -> None:
-        self.base_url = (
-            model_server_url
-            or os.environ.get("MODEL_SERVER_URL", _DEFAULT_URL)
-        ).rstrip("/")
-
-        self.timeout = float(
-            timeout
-            if timeout is not None
-            else os.environ.get("MODEL_SERVER_TIMEOUT", _DEFAULT_TIMEOUT)
-        )
-        self.batch_size = int(
-            batch_size
-            if batch_size is not None
-            else os.environ.get("MODEL_SERVER_BATCH_SIZE", _DEFAULT_BATCH_SIZE)
-        )
-        self.max_retries = int(
-            max_retries
-            if max_retries is not None
-            else os.environ.get("MODEL_SERVER_MAX_RETRIES", _DEFAULT_MAX_RETRY)
-        )
-        self.backoff_base = float(
-            backoff_base
-            if backoff_base is not None
-            else os.environ.get("MODEL_SERVER_BACKOFF", _DEFAULT_BACKOFF)
-        )
-
-        # Persistent client — reused for all requests to enable TCP connection
-        # pooling.  Without this, every embed call opens and closes a new
-        # connection, adding handshake latency proportional to batch count.
-        self._client = httpx.AsyncClient(timeout=self.timeout)
-
-    # ------------------------------------------------------------------
-    # Async context manager support
-    # ------------------------------------------------------------------
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_):
-        await self.close()
-
-    async def close(self) -> None:
-        """Close the underlying HTTP client and release pooled connections."""
-        await self._client.aclose()
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    def __init__(self, *args, **kwargs):
+        # Trigger model load on initialization so it happens once at startup
+        get_jina_model()
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """
-        Embed a list of text strings into 384-dim vectors.
+        # Run in threadpool to avoid blocking async event loop
+        return await asyncio.to_thread(embed_text, texts)
 
-        The list is split into batches of ``self.batch_size`` and each batch
-        is sent as one ``POST /embed/text`` request.  Results are reassembled
-        in the original order.
-
-        Args:
-            texts: Strings to embed (e.g. chunk texts from TextChunker).
-
-        Returns:
-            A list of float vectors, one per input string, in the same order.
-
-        Raises:
-            EmbeddingError: If the model-server fails after all retries.
-            ValueError:     If the server response has mismatched length.
-        """
-        if not texts:
-            return []
-
-        all_embeddings: list[list[float]] = []
-        batches = _batchify(texts, self.batch_size)
-
-        logger.info(
-            "Embedding %d text(s) in %d batch(es) (batch_size=%d)",
-            len(texts),
-            len(batches),
-            self.batch_size,
-        )
-
-        for batch_idx, batch in enumerate(batches):
-            t0 = time.monotonic()
-            embeddings = await self._post_text_batch(batch, batch_idx)
-            elapsed = (time.monotonic() - t0) * 1000
-
-            if len(embeddings) != len(batch):
-                raise ValueError(
-                    f"Batch {batch_idx}: expected {len(batch)} vectors, "
-                    f"got {len(embeddings)} from model-server"
-                )
-
-            logger.debug(
-                "Batch %d/%d embedded %d chunks in %.0f ms",
-                batch_idx + 1,
-                len(batches),
-                len(batch),
-                elapsed,
-            )
-            all_embeddings.extend(embeddings)
-
-        return all_embeddings
-
-    async def embed_image(
-        self,
-        image_bytes: bytes,
-        content_type: str = "image/jpeg",
-    ) -> list[float]:
-        """
-        Embed a single preprocessed image into a 384-dim vector.
-
-        Args:
-            image_bytes:  Raw image bytes (already resized/normalized by
-                          image_handler.py before calling here).
-            content_type: MIME type of the image (e.g. ``"image/jpeg"``).
-
-        Returns:
-            A single float vector.
-
-        Raises:
-            EmbeddingError: If the model-server fails after all retries.
-        """
-        if not image_bytes:
-            raise ValueError("image_bytes must not be empty")
-
-        url = f"{self.base_url}/embed/image"
-        logger.info(
-            "Embedding image (%s, %d bytes)", content_type, len(image_bytes)
-        )
-
-        response = await self._request_with_retry(
-            method="POST",
-            url=url,
-            files={"file": ("image", image_bytes, content_type)},
-        )
-
-        data = response.json()
-        embedding = data.get("embedding")
-        if not embedding or not isinstance(embedding, list):
-            raise EmbeddingError(
-                f"Model-server /embed/image returned unexpected body: {data!r}"
-            )
-
-        sanitized = [0.0 if (x is None or (isinstance(x, float) and math.isnan(x))) else x for x in embedding]
-        logger.debug("Image embedded — vector dim=%d", len(sanitized))
-        return sanitized
+    async def embed_image(self, image_bytes: bytes, content_type: str = "image/jpeg") -> list[float]:
+        # Save bytes to a temp file, call embed_image(image_paths), and return the single vector.
+        def _embed_bytes():
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                tmp.write(image_bytes)
+                tmp_path = tmp.name
+            try:
+                vectors = embed_image([tmp_path])
+                return vectors[0]
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+        return await asyncio.to_thread(_embed_bytes)
 
     async def health_check(self) -> bool:
-        """Return True if the model-server's /health endpoint responds 200."""
-        try:
-            resp = await self._client.get(f"{self.base_url}/health")
-            return resp.status_code == 200
-        except httpx.HTTPError:
-            return False
+        return get_jina_model() is not None
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    async def _post_text_batch(
-        self, batch: list[str], batch_idx: int
-    ) -> list[list[float]]:
-        """Send one batch to POST /embed/text and return its embeddings."""
-        url = f"{self.base_url}/embed/text"
-        response = await self._request_with_retry(
-            method="POST",
-            url=url,
-            json={"texts": batch},
-            extra_log={"batch_index": batch_idx, "batch_size": len(batch)},
-        )
-        data = response.json()
-        embeddings = data.get("embeddings")
-        if embeddings is None or not isinstance(embeddings, list):
-            raise EmbeddingError(
-                f"Model-server /embed/text returned unexpected body: {data!r}"
-            )
-        
-        sanitized = []
-        for vec in embeddings:
-            if vec is None:
-                sanitized.append([0.0] * 384)
-            else:
-                sanitized.append([0.0 if (x is None or (isinstance(x, float) and math.isnan(x))) else x for x in vec])
-        return sanitized
-
-    async def _request_with_retry(
-        self,
-        method: str,
-        url: str,
-        json: Optional[dict] = None,
-        files: Optional[dict] = None,
-        extra_log: Optional[dict] = None,
-    ) -> httpx.Response:
-        """
-        Send an HTTP request via the persistent client with retry on transients.
-
-        Retry policy:
-            - Retry on: 5xx responses, httpx.TimeoutException, httpx.ConnectError
-            - Do NOT retry on: 4xx responses (client error — won't fix itself)
-            - Backoff: attempt 1→2: base*1, attempt 2→3: base*2  (exponential)
-
-        Args:
-            method:    HTTP verb (``"POST"``).
-            url:       Full URL to call.
-            json:      JSON body dict (for text embedding).
-            files:     Multipart files dict (for image embedding).
-            extra_log: Extra fields merged into structured log records.
-
-        Returns:
-            The successful httpx.Response.
-
-        Raises:
-            EmbeddingError: After ``max_retries`` failed attempts.
-        """
-        last_error: Optional[Exception] = None
-        log_extra = extra_log or {}
-
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                if files:
-                    response = await self._client.request(method, url, files=files)
-                else:
-                    response = await self._client.request(method, url, json=json)
-                response.raise_for_status()
-                return response
-
-            except httpx.TimeoutException as exc:
-                last_error = exc
-                logger.warning(
-                    "Model-server timeout (attempt %d/%d): %s",
-                    attempt,
-                    self.max_retries,
-                    url,
-                    extra={**log_extra, "timeout": self.timeout},
-                )
-
-            except httpx.HTTPStatusError as exc:
-                last_error = exc
-                status = exc.response.status_code
-
-                logger.error(
-                    "Model-server HTTP %d (attempt %d/%d): %s",
-                    status,
-                    attempt,
-                    self.max_retries,
-                    url,
-                    extra={**log_extra, "response_body": exc.response.text[:300]},
-                )
-
-                # 4xx = client error — no point retrying
-                if 400 <= status < 500:
-                    raise EmbeddingError(
-                        f"Model-server client error {status} at {url}: "
-                        f"{exc.response.text[:200]}"
-                    ) from exc
-
-            except httpx.ConnectError as exc:
-                last_error = exc
-                logger.warning(
-                    "Model-server connection error (attempt %d/%d): %s",
-                    attempt,
-                    self.max_retries,
-                    str(exc),
-                    extra=log_extra,
-                )
-
-            except httpx.HTTPError as exc:
-                last_error = exc
-                logger.error(
-                    "Model-server unexpected HTTP error (attempt %d/%d): %s",
-                    attempt,
-                    self.max_retries,
-                    str(exc),
-                    extra=log_extra,
-                )
-
-            # Exponential backoff before next attempt
-            if attempt < self.max_retries:
-                wait = self.backoff_base * (2 ** (attempt - 1))
-                logger.debug("Backing off %.1f s before retry %d", wait, attempt + 1)
-                await asyncio.sleep(wait)
-
-        raise EmbeddingError(
-            f"Model-server failed after {self.max_retries} attempts "
-            f"({url}): {last_error}"
-        ) from last_error
-
-
-# ---------------------------------------------------------------------------
-# Utility
-# ---------------------------------------------------------------------------
-
-def _batchify(items: list, size: int) -> list[list]:
-    """Split *items* into sub-lists of at most *size* elements."""
-    return [items[i : i + size] for i in range(0, len(items), size)]
+    async def close(self) -> None:
+        pass

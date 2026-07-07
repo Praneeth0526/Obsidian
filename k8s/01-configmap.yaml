@@ -43,7 +43,8 @@ data:
   SEARCH_BM25_BOOST: "0.4"
   SEARCH_KNN_BOOST: "0.6"
   SEARCH_DEFAULT_SIZE: "10"
-  EMBEDDING_MODEL: "Alibaba-NLP/gme-Qwen2-VL-2B-Instruct"
+  EMBEDDING_MODEL: "clip-ViT-B-32"
+  EMBEDDING_DIMENSION: "512"
 
   # Redis
   REDIS_HOST: "redis"
@@ -60,3 +61,7 @@ data:
   # Logging
   LOG_LEVEL: "INFO"
   PYTHONUNBUFFERED: "1"
+
+  # Performance Tuning
+  MAX_CONCURRENT_EVENTS: "1"
+  OMP_NUM_THREADS: "2"

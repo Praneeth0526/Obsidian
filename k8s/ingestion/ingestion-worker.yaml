@@ -14,16 +14,6 @@ spec:
         app: ingestion-worker
     spec:
       initContainers:
-        # Don't start consuming until model-server /health is green
-        - name: wait-for-model-server
-          image: curlimages/curl:latest
-          imagePullPolicy: IfNotPresent
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              until curl -sf http://model-server:8000/health; do
-                echo "Waiting for model-server..."; sleep 10
-              done
         # Check mapping and create if missing
         - name: ensure-index-mapping
           image: curlimages/curl:latest
@@ -66,14 +56,20 @@ spec:
           envFrom:
             - configMapRef:
                 name: hpe-search-config
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
           resources:
             requests:
-              memory: "256Mi"
-              cpu: "100m"
+              memory: "512Mi"
+              cpu: "250m"
             limits:
-              memory: "1Gi"
-              cpu: "500m"
+              memory: "6Gi"
+              cpu: "2000m"
       volumes:
         - name: mapping
           configMap:
             name: opensearch-index-mapping
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: hf-cache-model-server

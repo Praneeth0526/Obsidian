@@ -30,7 +30,8 @@ spec:
               path: /health
               port: 8080
             initialDelaySeconds: 10
-            periodSeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 30
           resources:
             requests:
               memory: "64Mi"

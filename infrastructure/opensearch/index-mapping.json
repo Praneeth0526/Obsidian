@@ -127,7 +127,7 @@
 
       "embedding": {
         "type": "knn_vector",
-        "dimension": 1536,
+        "dimension": 512,
         "method": {
           "name": "hnsw",
           "engine": "nmslib",

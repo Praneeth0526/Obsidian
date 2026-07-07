@@ -60,8 +60,8 @@ class TextChunker:
 
     def __init__(
         self,
-        chunk_size: int = 512,
-        chunk_overlap: int = 50,
+        chunk_size: int = 600,
+        chunk_overlap: int = 60,
         min_chunk_size: int = 20,
         separators: Optional[list[str]] = None,
     ) -> None:

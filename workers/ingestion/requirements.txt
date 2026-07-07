@@ -19,3 +19,9 @@ piexif>=1.1.3,<2.0    # EXIF read/write (used by image_handler and test helpers)
 
 # Config loading
 python-dotenv>=1.0.1,<2.0
+
+# Jina CLIP v2 dependencies
+torch
+transformers<4.49.0
+einops
+timm

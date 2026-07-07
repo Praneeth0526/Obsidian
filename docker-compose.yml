@@ -36,6 +36,10 @@ services:
       retries: 5
       start_period: 30s
     restart: unless-stopped
+    labels:
+      - "autoheal=true"
+    volumes:
+      - kafka1-data:/var/lib/kafka/data
 
   # ---------------------------------------------------------------------------
   # Kafka 2 — KRaft node
@@ -69,6 +73,10 @@ services:
       retries: 5
       start_period: 30s
     restart: unless-stopped
+    labels:
+      - "autoheal=true"
+    volumes:
+      - kafka2-data:/var/lib/kafka/data
 
   # ---------------------------------------------------------------------------
   # Kafka 3 — KRaft node
@@ -102,10 +110,29 @@ services:
       retries: 5
       start_period: 30s
     restart: unless-stopped
+    labels:
+      - "autoheal=true"
+    volumes:
+      - kafka3-data:/var/lib/kafka/data
 
   # ---------------------------------------------------------------------------
   # Kafka Init — creates topics on the 3-node cluster
   # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # Autoheal — restarts any labeled container that Docker marks unhealthy
+  # (covers the gap where a deadlocked Kafka broker stays "running" but
+  #  stuck, and restart: unless-stopped alone would not catch that)
+  # ---------------------------------------------------------------------------
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: hpe-search-autoheal
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: 10
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
   kafka-init:
     image: apache/kafka:3.8.1
     container_name: hpe-search-kafka-init
@@ -194,6 +221,8 @@ services:
 
         echo "Creating uploads bucket..."
         mc mb local/uploads --ignore-existing
+        echo "Enabling bucket versioning..."
+        mc version enable local/uploads
 
         echo "Adding s3:ObjectCreated event → Kafka..."
         mc event add local/uploads arn:minio:sqs::1:kafka --event put || \
@@ -201,6 +230,19 @@ services:
 
         echo "Verifying events..."
         mc event list local/uploads
+
+        echo "Creating role-based buckets..."
+        mc mb local/admin-uploads --ignore-existing
+        mc mb local/manager-uploads --ignore-existing
+        mc mb local/user-uploads --ignore-existing
+        echo "Enabling versioning on role-based buckets..."
+        mc version enable local/admin-uploads
+        mc version enable local/manager-uploads
+        mc version enable local/user-uploads
+        echo "Adding Kafka events on role-based buckets..."
+        mc event add local/admin-uploads arn:minio:sqs::1:kafka --event put || echo "Event rule already exists, continuing..."
+        mc event add local/manager-uploads arn:minio:sqs::1:kafka --event put || echo "Event rule already exists, continuing..."
+        mc event add local/user-uploads arn:minio:sqs::1:kafka --event put || echo "Event rule already exists, continuing..."
 
         echo "=== MinIO Init complete ==="
     restart: "no"
@@ -513,5 +555,11 @@ volumes:
     name: hpe-search-opensearch-data
   redis-data:
     name: hpe-search-redis-data
+  kafka1-data:
+    name: hpe-search-kafka1-data
+  kafka2-data:
+    name: hpe-search-kafka2-data
+  kafka3-data:
+    name: hpe-search-kafka3-data
   hf-cache:
     name: hpe-search-hf-cache

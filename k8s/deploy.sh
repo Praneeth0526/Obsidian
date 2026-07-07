@@ -44,12 +44,28 @@ else
 fi
 
 info "Starting Minikube..."
-minikube start \
+if ! minikube start \
   --cpus=4 \
   --memory=12288 \
   ${GPU_FLAG} \
   --disk-size=40g \
-  --driver=docker
+  --driver=docker; then
+  
+    if [[ -n "${GPU_FLAG}" ]]; then
+        warn "Minikube failed to start with GPU passthrough! Falling back to CPU mode..."
+        GPU_FLAG=""
+        minikube delete 2>/dev/null || true
+        
+        info "Restarting Minikube (CPU only)..."
+        minikube start \
+          --cpus=4 \
+          --memory=12288 \
+          --disk-size=40g \
+          --driver=docker || die "Minikube failed to start even on CPU."
+    else
+        die "Minikube failed to start."
+    fi
+fi
 
 # Required for OpenSearch vm.max_map_count sysctl init container
 minikube addons enable default-storageclass 2>/dev/null || true
@@ -61,16 +77,10 @@ fi
 success "Minikube is running."
 
 # -----------------------------------------------------------------------------
-# 2. Build custom images inside Minikube's Docker daemon
+# 2. Build custom images on the HOST daemon to avoid Minikube network hangs
 # -----------------------------------------------------------------------------
-info "Pointing Docker to Minikube's daemon..."
-eval "$(minikube docker-env)"
-
-info "Building hpe-model-server..."
-docker build \
-  -t hpe-model-server:latest \
-  -f "${REPO_ROOT}/workers/model-server/Dockerfile" \
-  "${REPO_ROOT}"
+info "Ensuring Docker is pointing to HOST daemon (not Minikube)..."
+eval "$(minikube docker-env -u)"
 
 info "Building hpe-ingestion-worker..."
 docker build \
@@ -96,7 +106,11 @@ docker build \
   -f "${REPO_ROOT}/Search-Engine/frontend/Dockerfile" \
   "${REPO_ROOT}/Search-Engine"
 
-success "All custom images built."
+success "All custom images built on host."
+
+info "Loading images into Minikube cluster (this may take a moment)..."
+minikube image load hpe-ingestion-worker:latest hpe-pyworker-2:latest hpe-go-gateway:latest hpe-frontend:latest
+success "Images loaded into Minikube."
 
 # -----------------------------------------------------------------------------
 # 3. Apply manifests
@@ -176,12 +190,6 @@ kubectl wait --for=condition=complete job/opensearch-init -n "${NAMESPACE}" --ti
 # 6. Deploy application services
 # -----------------------------------------------------------------------------
 info "Deploying ingestion pipeline..."
-if [[ -n "${GPU_FLAG}" ]]; then
-    kubectl apply -f "${K8S_DIR}/ingestion/model-server.yaml"
-else
-    # Strip the GPU limit from the manifest so it doesn't get stuck in Pending
-    sed '/nvidia\.com\/gpu/d' "${K8S_DIR}/ingestion/model-server.yaml" | kubectl apply -f -
-fi
 kubectl apply -f "${K8S_DIR}/ingestion/ingestion-worker.yaml"
 kubectl apply -f "${K8S_DIR}/ingestion/dlq-retry-worker.yaml"
 
@@ -193,7 +201,6 @@ kubectl apply -f "${K8S_DIR}/search/frontend.yaml"
 # Force pods to pick up newly-built local images (imagePullPolicy: Never + mutable :latest tag
 # means Kubernetes won't restart pods automatically when the local image changes).
 info "Rolling out updated images..."
-kubectl rollout restart deployment/model-server      -n "${NAMESPACE}"
 kubectl rollout restart deployment/ingestion-worker  -n "${NAMESPACE}"
 kubectl rollout restart deployment/dlq-retry-worker  -n "${NAMESPACE}"
 kubectl rollout restart deployment/pyworker          -n "${NAMESPACE}"

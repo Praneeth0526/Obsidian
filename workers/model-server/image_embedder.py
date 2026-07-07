@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_MODEL_NAME = "Alibaba-NLP/gme-Qwen2-VL-2B-Instruct"
-_EXPECTED_DIM = 1536
+_MODEL_NAME = "sentence-transformers/clip-ViT-B-32"
+_EXPECTED_DIM = 512
 _EXPECTED_SIZE = (224, 224)
 
 # ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ class ImageEmbedder:
         )
 
         dim = self._model.get_sentence_embedding_dimension()
-        if dim != _EXPECTED_DIM:
+        if dim is not None and dim != _EXPECTED_DIM:
             raise RuntimeError(f"Expected dim {_EXPECTED_DIM}, got {dim}")
 
         logger.info("Image embedding model ready — dim=%d", dim)

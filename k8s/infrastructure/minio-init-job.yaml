@@ -30,6 +30,8 @@ spec:
 
               echo "Creating uploads bucket..."
               mc mb local/uploads --ignore-existing
+              echo "Enabling bucket versioning..."
+              mc version enable local/uploads
 
               echo "Adding Kafka notification event..."
               mc event add local/uploads arn:minio:sqs::1:kafka --event put || \
@@ -37,4 +39,20 @@ spec:
 
               echo "Verifying events..."
               mc event list local/uploads
+
+              echo "Creating role-based buckets..."
+              mc mb local/admin-uploads --ignore-existing
+              mc mb local/manager-uploads --ignore-existing
+              mc mb local/user-uploads --ignore-existing
+              
+              echo "Enabling versioning on role-based buckets..."
+              mc version enable local/admin-uploads
+              mc version enable local/manager-uploads
+              mc version enable local/user-uploads
+              
+              echo "Adding Kafka events on role-based buckets..."
+              mc event add local/admin-uploads arn:minio:sqs::1:kafka --event put || echo "Event rule already exists, continuing..."
+              mc event add local/manager-uploads arn:minio:sqs::1:kafka --event put || echo "Event rule already exists, continuing..."
+              mc event add local/user-uploads arn:minio:sqs::1:kafka --event put || echo "Event rule already exists, continuing..."
+
               echo "=== MinIO Init complete ==="

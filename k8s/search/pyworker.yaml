@@ -37,11 +37,12 @@ spec:
               mountPath: /root/.cache/huggingface
           resources:
             requests:
-              memory: "512Mi"
+              memory: "1Gi"
               cpu: "250m"
             limits:
-              memory: "6Gi"
+              memory: "10Gi"
               cpu: "2000m"
+              nvidia.com/gpu: 1
       volumes:
         - name: hf-cache
           persistentVolumeClaim:

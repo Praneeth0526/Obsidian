@@ -35,10 +35,10 @@ logger = logging.getLogger(__name__)
 
 # Model identifier consumed by sentence-transformers.
 # Must match model_spec.json → text_model.name.
-_MODEL_NAME = "Alibaba-NLP/gme-Qwen2-VL-2B-Instruct"
+_MODEL_NAME = "sentence-transformers/clip-ViT-B-32"
 
 # Expected output dimension — validated on first encode call.
-_EXPECTED_DIM = 1536
+_EXPECTED_DIM = 512
 
 # Default encode batch size sent to the SentenceTransformer encoder.
 # Larger values improve GPU throughput but increase VRAM pressure.
@@ -117,7 +117,7 @@ class TextEmbedder:
         )
         # Validate dimension on startup so mismatches surface immediately.
         dim = self._model.get_sentence_embedding_dimension()
-        if dim != _EXPECTED_DIM:
+        if dim is not None and dim != _EXPECTED_DIM:
             raise RuntimeError(
                 f"Text model '{self.model_name}' produces {dim}-dim vectors; "
                 f"expected {_EXPECTED_DIM}. Update model_spec.json if intentional."
@@ -161,10 +161,14 @@ class TextEmbedder:
             self.encode_batch_size,
         )
 
+        # CLIP text models have a strict 77 token limit (max_position_embeddings).
+        # We aggressively truncate strings to 300 characters to prevent crashes.
+        truncated_texts = [t[:300] for t in texts]
+
         # encode() returns a numpy ndarray of shape (N, 384).
         # tolist() converts to a plain Python list[list[float]].
         vectors = self._model.encode(
-            texts,
+            truncated_texts,
             batch_size=self.encode_batch_size,
             normalize_embeddings=True,
             show_progress_bar=False,

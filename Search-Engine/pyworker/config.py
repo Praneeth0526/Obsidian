@@ -6,8 +6,8 @@ GRPC_PORT = int(os.getenv("GRPC_PORT", "50051"))
 GRPC_SEARCH_PORT = int(os.getenv("GRPC_SEARCH_PORT", "50052"))
 
 # Embedding Model Configuration
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Alibaba-NLP/gme-Qwen2-VL-2B-Instruct")
-EMBEDDING_DIMENSION = 1536  # gme-Qwen2-VL outputs 1536-dim vectors
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "clip-ViT-B-32")
+EMBEDDING_DIMENSION = 512  # clip-ViT-B-32 outputs 512-dim vectors
 
 OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
 OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
