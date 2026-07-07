@@ -295,6 +295,8 @@ class SearchWorkerServicer(search_pb2_grpc.SearchWorkerServicer):
 
         merged: List[Dict] = []
         try:
+            import json
+            print(f"[*] OpenSearch Query: {json.dumps(body)}")
             resp = self.opensearch.search(
                 index=OPENSEARCH_INDEX, 
                 body=body,

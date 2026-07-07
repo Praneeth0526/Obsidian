@@ -747,3 +747,9 @@ Both use `--if-not-exists` so they are safe to run on every deploy.
 ### Zero results despite documents being indexed
 
 If kNN fails, the combined score will be at most `0.4` (BM25-only). A threshold above `0.4` will return zero results. The current threshold is `0.45` in `pyworker/search_worker.py`. Raise it for precision or lower it for recall.
+
+---
+
+## Recent Enhancements
+
+* **Timezone-Aware Date Queries:** The NLP parsing engine now seamlessly supports timezone-relative date range queries (e.g., "get files uploaded on july 7th" or "today"). It intelligently injects local offsets into OpenSearch queries, reconciling the user's local timezone with UTC ingestion timestamps to guarantee precise file retrieval bounds without missing boundary-case uploads.
