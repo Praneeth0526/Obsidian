@@ -34,17 +34,29 @@ fi
 # -----------------------------------------------------------------------------
 # 1. Start Minikube (no-op if already running)
 # -----------------------------------------------------------------------------
+info "Checking for GPU availability..."
+GPU_FLAG=""
+if command -v nvidia-smi >/dev/null 2>&1 && docker run --rm --gpus all ubuntu nvidia-smi >/dev/null 2>&1; then
+    success "NVIDIA GPU detected and Docker GPU support confirmed."
+    GPU_FLAG="--gpus=all"
+else
+    warn "GPU not detected or Docker missing nvidia toolkit. Falling back to CPU."
+fi
+
 info "Starting Minikube..."
 minikube start \
   --cpus=4 \
   --memory=12288 \
-  --gpus=all \
+  ${GPU_FLAG} \
   --disk-size=40g \
-  --driver=docker 2>/dev/null || true
+  --driver=docker
 
 # Required for OpenSearch vm.max_map_count sysctl init container
 minikube addons enable default-storageclass 2>/dev/null || true
-minikube addons enable nvidia-device-plugin 2>/dev/null || true
+
+if [[ -n "${GPU_FLAG}" ]]; then
+    minikube addons enable nvidia-device-plugin 2>/dev/null || true
+fi
 
 success "Minikube is running."
 
@@ -164,7 +176,12 @@ kubectl wait --for=condition=complete job/opensearch-init -n "${NAMESPACE}" --ti
 # 6. Deploy application services
 # -----------------------------------------------------------------------------
 info "Deploying ingestion pipeline..."
-kubectl apply -f "${K8S_DIR}/ingestion/model-server.yaml"
+if [[ -n "${GPU_FLAG}" ]]; then
+    kubectl apply -f "${K8S_DIR}/ingestion/model-server.yaml"
+else
+    # Strip the GPU limit from the manifest so it doesn't get stuck in Pending
+    sed '/nvidia\.com\/gpu/d' "${K8S_DIR}/ingestion/model-server.yaml" | kubectl apply -f -
+fi
 kubectl apply -f "${K8S_DIR}/ingestion/ingestion-worker.yaml"
 kubectl apply -f "${K8S_DIR}/ingestion/dlq-retry-worker.yaml"
 
