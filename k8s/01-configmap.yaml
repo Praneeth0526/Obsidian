@@ -43,7 +43,7 @@ data:
   SEARCH_BM25_BOOST: "0.4"
   SEARCH_KNN_BOOST: "0.6"
   SEARCH_DEFAULT_SIZE: "10"
-  EMBEDDING_MODEL: "sentence-transformers/all-MiniLM-L6-v2"
+  EMBEDDING_MODEL: "Alibaba-NLP/gme-Qwen2-VL-2B-Instruct"
 
   # Redis
   REDIS_HOST: "redis"

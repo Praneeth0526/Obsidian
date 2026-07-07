@@ -38,8 +38,9 @@ spec:
               memory: "1Gi"
               cpu: "500m"
             limits:
-              memory: "4Gi"
+              memory: "6Gi"
               cpu: "2000m"
+              nvidia.com/gpu: 1
       volumes:
         - name: hf-cache
           persistentVolumeClaim:

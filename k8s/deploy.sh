@@ -36,13 +36,15 @@ fi
 # -----------------------------------------------------------------------------
 info "Starting Minikube..."
 minikube start \
-  --cpus=2 \
-  --memory=4096 \
+  --cpus=4 \
+  --memory=12288 \
+  --gpus=all \
   --disk-size=40g \
   --driver=docker 2>/dev/null || true
 
 # Required for OpenSearch vm.max_map_count sysctl init container
 minikube addons enable default-storageclass 2>/dev/null || true
+minikube addons enable nvidia-device-plugin 2>/dev/null || true
 
 success "Minikube is running."
 
@@ -132,12 +134,8 @@ kubectl exec deployment/opensearch -n "${NAMESPACE}" -- /bin/sh -c '
     echo "Index exists, skipping creation."
   else
     echo "Creating index with mapping..."
-    curl -sf -X PUT http://localhost:9200/hpe-search-docs \
-      -H "Content-Type: application/json" \
-      -d @/usr/share/opensearch/data/mapping.json || \
-    curl -sf -X PUT http://localhost:9200/hpe-search-docs \
-      -H "Content-Type: application/json" \
-      -d "$(cat /etc/opensearch-index-mapping/mapping.json 2>/dev/null || echo "{}")"
+    # Rely on opensearch-init-job to create it instead of creating it empty here
+    echo "Skipping manual creation here, waiting for opensearch-init job."
   fi
 ' || true
 

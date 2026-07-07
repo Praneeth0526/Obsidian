@@ -1,40 +1,31 @@
 """
-Embedding Service - Generates vector embeddings using SentenceTransformers
+Embedding Service - Generates vector embeddings by calling model-server API
 """
 import os
-
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
-os.environ.setdefault("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-
-import numpy as np
+import requests
 from typing import List
-from sentence_transformers import SentenceTransformer
-from config import EMBEDDING_MODEL, EMBEDDING_DIMENSION
+from config import EMBEDDING_DIMENSION
 
+MODEL_SERVER_URL = os.getenv("MODEL_SERVER_URL", "http://model-server:8000")
 
 class EmbeddingService:
-    """Service for generating text embeddings using SentenceTransformers."""
+    """Service for generating text embeddings using model-server API."""
 
     _instance = None
-    _model = None
 
     def __new__(cls):
-        """Singleton pattern to ensure model is loaded only once."""
+        """Singleton pattern."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self):
         """Initialize the embedding service."""
-        if self._model is None:
-            print(f"[*] Loading embedding model: {EMBEDDING_MODEL}")
-            self._model = SentenceTransformer(EMBEDDING_MODEL)
-            print(f"[+] Embedding model loaded (dimension: {EMBEDDING_DIMENSION})")
+        pass
 
     def encode(self, text: str) -> List[float]:
         """
-        Encode text into a vector embedding.
+        Encode text into a vector embedding using the model-server.
 
         Args:
             text: The text to encode
@@ -46,11 +37,18 @@ class EmbeddingService:
             # Return zero vector for empty text
             return [0.0] * EMBEDDING_DIMENSION
 
-        # Generate embedding
-        embedding = self._model.encode(text.strip(), convert_to_numpy=True)
-
-        # Convert to list of floats
-        return embedding.tolist()
+        try:
+            resp = requests.post(
+                f"{MODEL_SERVER_URL}/embed/text",
+                json={"texts": [text.strip()]},
+                timeout=30.0
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["embeddings"][0]
+        except Exception as e:
+            print(f"[!] Embedding service request failed: {e}")
+            return [0.0] * EMBEDDING_DIMENSION
 
     def get_dimension(self) -> int:
         """Get the dimension of the embedding vectors."""

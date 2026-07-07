@@ -35,10 +35,10 @@ logger = logging.getLogger(__name__)
 
 # Model identifier consumed by sentence-transformers.
 # Must match model_spec.json → text_model.name.
-_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+_MODEL_NAME = "Alibaba-NLP/gme-Qwen2-VL-2B-Instruct"
 
 # Expected output dimension — validated on first encode call.
-_EXPECTED_DIM = 384
+_EXPECTED_DIM = 1536
 
 # Default encode batch size sent to the SentenceTransformer encoder.
 # Larger values improve GPU throughput but increase VRAM pressure.
@@ -109,9 +109,11 @@ class TextEmbedder:
             self.model_name,
             self.device or "auto",
         )
+        import torch
         self._model = SentenceTransformer(
             self.model_name,
             device=self.device,
+            trust_remote_code=True,
         )
         # Validate dimension on startup so mismatches surface immediately.
         dim = self._model.get_sentence_embedding_dimension()

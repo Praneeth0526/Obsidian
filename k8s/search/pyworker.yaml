@@ -40,8 +40,8 @@ spec:
               memory: "512Mi"
               cpu: "250m"
             limits:
-              memory: "2Gi"
-              cpu: "1000m"
+              memory: "6Gi"
+              cpu: "2000m"
       volumes:
         - name: hf-cache
           persistentVolumeClaim:
