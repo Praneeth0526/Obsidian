@@ -38,9 +38,8 @@ A production-grade, hybrid (BM25 + kNN) enterprise search pipeline built on Open
 │  MinIO (S3)  ──PUT event──▶  Kafka (3-node)  ──▶  Ingestion      │
 │  :9000/:9001                 :29092               Worker          │
 │                                                    │              │
-│                              Model Server  ◀───────┤  (embed)    │
-│                              :8000 (text+image)     │              │
-│                                                     ▼              │
+│                                       (Jina CLIP v2 local embed)  │
+│                                                    │              │
 │                              Tika  ◀──────── OpenSearch :9200    │
 │                              :9998                  │              │
 └──────────────────────────────────────────── Redis :6379 ─────────┘
@@ -268,15 +267,8 @@ HPE/
 │   │   ├── tika_extractor.py       # Apache Tika text & metadata extraction
 │   │   ├── chunker.py              # Sliding-window text chunker
 │   │   ├── image_handler.py        # Image pipeline (resize → embed)
-│   │   ├── model_client.py         # HTTP client → model-server
+│   │   ├── model_client.py         # Local Jina CLIP v2 embedding inference
 │   │   └── opensearch_client.py    # Bulk upsert into OpenSearch
-│   └── model-server/               # FastAPI embedding server
-│       ├── server.py               # /embed/text  /embed/image  endpoints
-│       ├── text_embedder.py        # SentenceTransformer (384-dim)
-│       ├── image_embedder.py       # nomic-embed-vision-v1.5 image embedder
-│       ├── main.py                 # Uvicorn entry
-│       ├── requirements.txt        # Model-server-specific Python deps
-│       └── load-balancer/nginx.conf
 │
 ├── backend/
 │   ├── cache/redis_cache.py        # Python Redis cache layer (search results)
@@ -293,7 +285,7 @@ HPE/
 │   ├── 01-configmap.yaml
 │   ├── 02-pvcs.yaml
 │   ├── infrastructure/             # Kafka, MinIO, Tika, OpenSearch, Redis
-│   ├── ingestion/                  # model-server, ingestion-worker
+│   ├── ingestion/                  # ingestion-worker
 │   ├── search/                     # pyworker, go-gateway, frontend
 │   └── deploy.sh                   # One-shot deploy script for Minikube
 │
@@ -395,7 +387,6 @@ minikube delete
 | **Frontend**              | `3000`  | Next.js search UI                       |
 | **Go Gateway**            | `8080`  | REST API (`GET /search`, `GET /health`) |
 | **PyWorker-2**            | `50052` | gRPC — NLP parse → embed → OpenSearch   |
-| **Model Server**          | `8000`  | FastAPI text + image embedding          |
 | **OpenSearch**            | `9200`  | Hybrid BM25 + kNN search database       |
 | **OpenSearch Dashboards** | `5601`  | Index inspection UI                     |
 | **Redis**                 | `6379`  | Search result cache                     |
@@ -490,7 +481,7 @@ curl -X PUT http://localhost:9200/hpe-search-docs \
       - Exact calendar dates (e.g. "May 15th") → 24-hour range filter
       - Relative dates (last week / month / year / yesterday / today)
       - File type, extension, and size filters
-   b. SentenceTransformer embed query → 384-dim vector
+   b. Jina CLIP v2 local embed query → 512-dim vector
    c. OpenSearch query:
       - kNN semantic search using the embedded vector (k=50, HNSW cosine)
       - BM25 keyword search with fuzziness:AUTO (handles typos like "informaton" → "information")
@@ -517,8 +508,8 @@ curl -X PUT http://localhost:9200/hpe-search-docs \
    a. Download file bytes from MinIO
    b. Apache Tika: extract text + metadata
    c. Route by content type:
-      - Image  → Model Server /embed/image → 384-dim vector → single chunk doc
-      - Text   → TextChunker (sliding window) → Model Server /embed/text → N chunk docs
+      - Image  → Local Jina CLIP v2 inference → 512-dim vector → single chunk doc
+      - Text   → TextChunker (sliding window) → Local Jina CLIP v2 inference → N chunk docs
    d. OpenSearch bulk upsert (object_key/chunk_index = document ID, idempotent)
 ```
 

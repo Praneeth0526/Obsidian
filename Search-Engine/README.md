@@ -28,7 +28,7 @@ The search-side pipeline. Receives a natural-language query from the browser, ch
 | ----------------------- | ------- | ------------------------------------------------------------------------- |
 | `frontend`              | `3000`  | Next.js Object Search UI                                                  |
 | `go-gateway`            | `8080`  | REST entry point — `GET /search`, `GET /health`                           |
-| `pyworker-2`            | `50052` | gRPC — spaCy NLP → SentenceTransformer embed → OpenSearch + T5 summarizer |
+| `pyworker-2`            | `50052` | gRPC — spaCy NLP → Jina CLIP v2 embed → OpenSearch + T5 summarizer |
 | `opensearch`            | `9200`  | Hybrid BM25 + kNN search database                                         |
 | `opensearch-dashboards` | `5601`  | Dev UI for inspecting the index                                           |
 | `redis`                 | `6379`  | Search result cache (Steps 1 & 4 of search flow)                          |
@@ -201,7 +201,7 @@ Go Gateway :8080
            │ a. spaCy NLP parse
            │    · exact dates → range filter
            │    · relative dates/type/size → filter clauses
-           │ b. SentenceTransformer embed (384-dim)
+           │ b. Jina CLIP v2 embed (512-dim)
            │ c. OpenSearch hybrid query:
            │    - kNN semantic search (HNSW cosine, k=50)
            │    - BM25 keyword search (fuzziness: AUTO)
@@ -261,7 +261,7 @@ Index name: **`hpe-search-docs`** (set via `OPENSEARCH_INDEX` env var).
 
 The index is automatically created by the ingestion pipeline's `opensearch-init` container using the mapping at `../infrastructure/opensearch/index-mapping.json`.
 
-> **Important:** The `embedding` field **must** be mapped as `knn_vector` type (dimension: 384, engine: nmslib, space: cosinesimil) for semantic search to work. If you see `Field 'embedding' is not knn_vector type`, the index was auto-created with a plain `float` type. Fix it by dropping and recreating:
+> **Important:** The `embedding` field **must** be mapped as `knn_vector` type (dimension: 512, engine: nmslib, space: cosinesimil) for semantic search to work. If you see `Field 'embedding' is not knn_vector type`, the index was auto-created with a plain `float` type. Fix it by dropping and recreating:
 
 ```bash
 # Drop the incorrectly typed index
@@ -332,7 +332,7 @@ Search-Engine/
 ├── pyworker/                       # gRPC search worker (Role 5)
 │   ├── search_worker.py            # gRPC servicer: NLP → embed → OpenSearch → T5 summarize
 │   ├── nlp_parser.py               # spaCy NLP — intent, keywords, filters
-│   ├── embedding_service.py        # SentenceTransformer all-MiniLM-L6-v2 (384-dim)
+│   ├── embedding_service.py        # Jina CLIP v2 (512-dim)
 │   ├── config.py                   # All env-var config (OpenSearch + Redis)
 │   ├── requirements.txt            # Includes sentencepiece for T5 tokenizer
 │   ├── proto/                      # Generated Python gRPC stubs
