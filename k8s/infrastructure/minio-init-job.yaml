@@ -34,7 +34,7 @@ spec:
               mc version enable local/uploads
 
               echo "Adding Kafka notification event..."
-              mc event add local/uploads arn:minio:sqs::1:kafka --event put || \
+              mc event add local/uploads arn:minio:sqs::1:kafka --event put,delete || \
                 echo "Event rule already exists, continuing..."
 
               echo "Verifying events..."
@@ -51,8 +51,8 @@ spec:
               mc version enable local/user-uploads
               
               echo "Adding Kafka events on role-based buckets..."
-              mc event add local/admin-uploads arn:minio:sqs::1:kafka --event put || echo "Event rule already exists, continuing..."
-              mc event add local/manager-uploads arn:minio:sqs::1:kafka --event put || echo "Event rule already exists, continuing..."
-              mc event add local/user-uploads arn:minio:sqs::1:kafka --event put || echo "Event rule already exists, continuing..."
+              mc event add local/admin-uploads arn:minio:sqs::1:kafka --event put,delete || echo "Event rule already exists, continuing..."
+              mc event add local/manager-uploads arn:minio:sqs::1:kafka --event put,delete || echo "Event rule already exists, continuing..."
+              mc event add local/user-uploads arn:minio:sqs::1:kafka --event put,delete || echo "Event rule already exists, continuing..."
 
               echo "=== MinIO Init complete ==="

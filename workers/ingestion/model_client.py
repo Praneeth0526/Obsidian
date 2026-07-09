@@ -32,6 +32,11 @@ def get_jina_model():
             **model_kwargs
         ).to(device)
         _jina_model.eval()
+#New line  remove later
+	logger.info("Jina model device: %s", next(_jina_model.parameters()).device)
+	if torch.cuda.is_available():
+		logger.info("GPU memory allocated: %.2f GB",torch.cuda.memory_allocated() / 1024**3)
+#till here
     return _jina_model
 
 def embed_text(texts: list[str]) -> list[list[float]]:

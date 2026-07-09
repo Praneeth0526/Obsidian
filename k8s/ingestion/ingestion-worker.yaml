@@ -66,6 +66,7 @@ spec:
             limits:
               memory: "6Gi"
               cpu: "2000m"
+              nvidia.com/gpu: "1"
       volumes:
         - name: mapping
           configMap:

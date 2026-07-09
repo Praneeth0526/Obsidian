@@ -45,8 +45,8 @@ fi
 
 info "Starting Minikube..."
 if ! minikube start \
-  --cpus=4 \
-  --memory=12288 \
+  --cpus=8 \
+  --memory=24576 \
   ${GPU_FLAG} \
   --disk-size=40g \
   --driver=docker; then
@@ -58,8 +58,8 @@ if ! minikube start \
         
         info "Restarting Minikube (CPU only)..."
         minikube start \
-          --cpus=4 \
-          --memory=12288 \
+          --cpus=8 \
+          --memory=24576 \
           --disk-size=40g \
           --driver=docker || die "Minikube failed to start even on CPU."
     else
